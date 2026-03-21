@@ -1,0 +1,25 @@
+{
+  "personal-trainer": {
+    "permissionMode": "bypassPermissions"
+  },
+  "ai-steward": {
+    "addDirs": [
+      "/home/kaz/git/github.com/kaz-under-the-bridge/ouchi-server"
+    ]
+  },
+  "ouchi-server": {
+    "addDirs": [
+      "/home/kaz/git/github.com/kaz-under-the-bridge/my-cloud-iac-aws"
+    ]
+  },
+  "money-management": {
+    "addDirs": [
+      "/home/kaz/git/github.com/kaz-under-the-bridge/divorce_arrangement"
+    ]
+  },
+  "divorce_arrangement": {
+    "addDirs": [
+      "/home/kaz/git/github.com/kaz-under-the-bridge/money-management"
+    ]
+  }
+}

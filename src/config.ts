@@ -1,3 +1,12 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+export interface RepoConfig {
+  permissionMode?: string;    // --permission-mode
+  addDirs?: string[];          // --add-dir（複数可）
+  extraArgs?: string[];        // その他の任意CLI引数
+}
+
 export interface AppConfig {
   slack: {
     botToken: string;
@@ -13,8 +22,8 @@ export interface AppConfig {
   anthropicApiKey: string | null;
   dbPath: string;
   logLevel: string;
-  // リポ名 → permission-mode マッピング（未指定はdefault）
-  repoPermissionOverrides: Map<string, string>;
+  // リポ名 → CLI設定
+  repoConfigs: Map<string, RepoConfig>;
   // チャンネルID → リポパス バインディング
   channelRepoBindings: Map<string, string>;
 }
@@ -30,6 +39,24 @@ function parseKeyValuePairs(input: string | undefined): Map<string, string> {
     if (key && value) {
       map.set(key, value);
     }
+  }
+  return map;
+}
+
+/**
+ * config/repos.json を読み込んでリポ名→RepoConfigのMapを返す
+ */
+function loadRepoConfigs(): Map<string, RepoConfig> {
+  const map = new Map<string, RepoConfig>();
+  try {
+    const configPath = resolve(process.cwd(), 'config/repos.json');
+    const raw = readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, RepoConfig>;
+    for (const [name, config] of Object.entries(parsed)) {
+      map.set(name, config);
+    }
+  } catch {
+    // ファイルが存在しない場合は空Mapを返す
   }
   return map;
 }
@@ -56,7 +83,7 @@ export function loadConfig(): AppConfig {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
     dbPath: process.env.DB_PATH || './data/steward.db',
     logLevel: process.env.LOG_LEVEL || 'info',
-    repoPermissionOverrides: parseKeyValuePairs(process.env.REPO_PERMISSION_OVERRIDES),
+    repoConfigs: loadRepoConfigs(),
     channelRepoBindings: parseKeyValuePairs(process.env.CHANNEL_REPO_BINDINGS),
   };
 }
