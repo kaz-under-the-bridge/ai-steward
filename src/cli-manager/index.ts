@@ -59,10 +59,12 @@ export class CliManager extends EventEmitter {
       params.resumeClaudeSessionId ? 'CLI再開（--resume）' : 'CLI起動',
     );
 
+    // ANTHROPIC_API_KEYをCLIに渡さない（OAuthサブスクリプションを使わせる）
+    const { ANTHROPIC_API_KEY: _, ...envWithoutApiKey } = process.env;
     const proc = spawn(this.config.claudePath, args, {
       cwd,
       env: {
-        ...process.env,
+        ...envWithoutApiKey,
         HOME: this.config.homeDir,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
