@@ -133,9 +133,9 @@ export class Orchestrator {
       }
     }
 
-    // リポ名からpermission-modeを解決
+    // リポ名からRepoConfigを解決
     const repoName = resolvedCwd.split('/').pop() || '';
-    const permissionMode = this.config.repoPermissionOverrides.get(repoName) || undefined;
+    const repoConfig = this.config.repoConfigs.get(repoName);
 
     const sessionId = uuidv4();
 
@@ -194,7 +194,7 @@ export class Orchestrator {
         prompt,
         cwd: resolvedCwd,
         resumeClaudeSessionId,
-        permissionMode,
+        repoConfig,
       });
     } catch (err) {
       log.error({ err, sessionId }, 'セッション起動失敗');

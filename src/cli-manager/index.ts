@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { createChildLogger } from '../logger.js';
 import type { CliSession } from '../types.js';
+import type { RepoConfig } from '../config.js';
 
 const log = createChildLogger('cli-manager');
 
@@ -26,9 +27,10 @@ export class CliManager extends EventEmitter {
     cwd?: string;
     resumeClaudeSessionId?: string;
     allowedTools?: string[];
-    permissionMode?: string;
+    repoConfig?: RepoConfig;
   }): Promise<CliSession> {
     const cwd = params.cwd || this.config.defaultCwd;
+    const rc = params.repoConfig;
 
     const args = [
       '-p',
@@ -46,12 +48,23 @@ export class CliManager extends EventEmitter {
       args.push('--allowedTools', ...params.allowedTools);
     }
 
-    if (params.permissionMode) {
-      args.push('--permission-mode', params.permissionMode);
+    // RepoConfigからCLI引数を組み立て
+    if (rc?.permissionMode) {
+      args.push('--permission-mode', rc.permissionMode);
     }
 
-    // /tmp/ai-steward-files を追加ディレクトリとして許可（画像等のtmpファイル用）
+    // --add-dir: /tmp/ai-steward-files（常に）+ RepoConfigの追加分
     args.push('--add-dir', '/tmp/ai-steward-files');
+    if (rc?.addDirs) {
+      for (const dir of rc.addDirs) {
+        args.push('--add-dir', dir);
+      }
+    }
+
+    // その他の任意CLI引数
+    if (rc?.extraArgs) {
+      args.push(...rc.extraArgs);
+    }
 
     log.info(
       {
@@ -60,6 +73,7 @@ export class CliManager extends EventEmitter {
         prompt: params.prompt.slice(0, 100),
         resume: params.resumeClaudeSessionId || null,
         allowedTools: params.allowedTools || null,
+        repoConfig: rc || null,
       },
       params.resumeClaudeSessionId ? 'CLI再開（--resume）' : 'CLI起動',
     );
