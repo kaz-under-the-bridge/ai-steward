@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { createChildLogger } from '../logger.js';
 import type { CliSession } from '../types.js';
@@ -79,10 +80,15 @@ export class CliManager extends EventEmitter {
 
     // ANTHROPIC_API_KEYをCLIに渡さない（OAuthサブスクリプションを使わせる）
     const { ANTHROPIC_API_KEY: _, ...envWithoutApiKey } = process.env;
+
+    // SSH_AUTH_SOCKを~/.ssh-agentから取得（systemdではシェル初期化されないため）
+    const sshEnv = this.loadSshAgentEnv();
+
     const proc = spawn(this.config.claudePath, args, {
       cwd,
       env: {
         ...envWithoutApiKey,
+        ...sshEnv,
         HOME: this.config.homeDir,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -132,6 +138,23 @@ export class CliManager extends EventEmitter {
     if (entry) {
       entry.process.kill('SIGTERM');
     }
+  }
+
+  /**
+   * ~/.ssh-agentからSSH_AUTH_SOCKとSSH_AGENT_PIDを読み取る
+   */
+  private loadSshAgentEnv(): Record<string, string> {
+    const env: Record<string, string> = {};
+    try {
+      const agentFile = readFileSync(`${this.config.homeDir}/.ssh-agent`, 'utf-8');
+      const sockMatch = agentFile.match(/SSH_AUTH_SOCK=([^;]+)/);
+      const pidMatch = agentFile.match(/SSH_AGENT_PID=([^;]+)/);
+      if (sockMatch) env.SSH_AUTH_SOCK = sockMatch[1];
+      if (pidMatch) env.SSH_AGENT_PID = pidMatch[1];
+    } catch {
+      log.warn('~/.ssh-agentの読み取りに失敗');
+    }
+    return env;
   }
 
   getActiveSessions(): CliSession[] {
