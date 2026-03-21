@@ -135,8 +135,11 @@ export class Orchestrator {
       return;
     }
 
+    // 「新規」キーワードで強制新セッション
+    const forceNew = msg.text && /^(新規セッション|new session|reset session)$/i.test(msg.text.trim());
+
     const existingSession = this.stateManager.getSessionByThread(msg.channelId, msg.threadTs);
-    const resumeClaudeSessionId = existingSession?.claudeSessionId || undefined;
+    let resumeClaudeSessionId = existingSession?.claudeSessionId || undefined;
     const cwd = existingSession?.cwd || undefined;
 
     let resolvedCwd: string;
@@ -152,6 +155,34 @@ export class Orchestrator {
         const resolved = resolveRepo(msg.text, this.config.claude.defaultCwd, this.config.claude.defaultCwd);
         resolvedCwd = resolved.cwd;
       }
+    }
+
+    // 同じcwdで別スレッドが実行中なら拒否（誤操作保護）
+    if (!existingSession) {
+      const runningSession = this.stateManager.hasRunningSessionByCwd(resolvedCwd);
+      if (runningSession && `${runningSession.channelId}:${runningSession.threadTs}` !== threadKey) {
+        log.info({ cwd: resolvedCwd, runningThreadTs: runningSession.threadTs }, '同じcwdで別スレッドが実行中のため拒否');
+        await this.slackBot.postMessage({
+          channelId: msg.channelId,
+          threadTs: msg.threadTs,
+          text: `同じリポジトリで別スレッドが実行中です。完了後にもう一度お試しください。`,
+        });
+        return;
+      }
+    }
+
+    // 同一スレッド内にセッションがない場合、同じcwdの直近completedセッションを引き継ぐ
+    if (!resumeClaudeSessionId && !forceNew) {
+      const prevSession = this.stateManager.getLatestCompletedSessionByCwd(resolvedCwd);
+      if (prevSession?.claudeSessionId) {
+        resumeClaudeSessionId = prevSession.claudeSessionId;
+        log.info({ cwd: resolvedCwd, claudeSessionId: prevSession.claudeSessionId }, 'cwdベースでセッション引き継ぎ');
+      }
+    }
+
+    if (forceNew) {
+      resumeClaudeSessionId = undefined;
+      log.info({ cwd: resolvedCwd }, '新規セッション（強制）');
     }
 
     // リポ名からRepoConfigを解決
