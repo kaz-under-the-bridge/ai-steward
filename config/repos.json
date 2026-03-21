@@ -3,21 +3,25 @@
     "permissionMode": "bypassPermissions"
   },
   "ai-steward": {
+    "permissionMode": "bypassPermissions",
     "addDirs": [
       "/home/kaz/git/github.com/kaz-under-the-bridge/ouchi-server"
     ]
   },
   "ouchi-server": {
+    "permissionMode": "bypassPermissions",
     "addDirs": [
       "/home/kaz/git/github.com/kaz-under-the-bridge/my-cloud-iac-aws"
     ]
   },
   "money-management": {
+    "permissionMode": "bypassPermissions",
     "addDirs": [
       "/home/kaz/git/github.com/kaz-under-the-bridge/divorce_arrangement"
     ]
   },
   "divorce_arrangement": {
+    "permissionMode": "bypassPermissions",
     "addDirs": [
       "/home/kaz/git/github.com/kaz-under-the-bridge/money-management"
     ]
