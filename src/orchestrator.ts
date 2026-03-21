@@ -13,7 +13,7 @@ import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './
 
 const log = createChildLogger('orchestrator');
 
-const MAX_APPROVAL_RETRIES = 3;
+const MAX_APPROVAL_RETRIES = 1;
 
 // 承認待ち情報
 interface PendingApproval {
@@ -347,6 +347,20 @@ export class Orchestrator {
           this.permissionErrors.delete(event.sessionId);
 
           const claudeSessionId = session.claudeSessionId;
+
+          // sensitive fileはai-steward経由では対応不可 → session ID案内
+          if (permError.includes('sensitive file') && claudeSessionId) {
+            log.info({ sessionId: event.sessionId, claudeSessionId }, 'sensitive file検知、セッションID案内');
+            await this.slackBot.postMessage({
+              channelId: session.channelId,
+              threadTs: session.threadTs,
+              text: `この操作はai-steward経由では実行できません（sensitive file）。\nターミナルで続行できます:\n\`\`\`\nclaude --resume ${claudeSessionId}\n\`\`\``,
+            });
+            this.stateManager.updateStatus(event.sessionId, 'completed');
+            this.finishSession(threadKey, event.sessionId);
+            break;
+          }
+
           const retryCount = this.approvalRetryCount.get(threadKey) || 0;
 
           if (claudeSessionId && retryCount < MAX_APPROVAL_RETRIES) {
@@ -376,13 +390,13 @@ export class Orchestrator {
             log.info({ sessionId: event.sessionId, retryCount }, '承認ボタンを表示');
             break;
           } else if (retryCount >= MAX_APPROVAL_RETRIES) {
-            // リトライ上限超過
+            // リトライ上限超過 → session ID案内
             log.warn({ sessionId: event.sessionId, retryCount }, '承認リトライ上限超過');
-            this.approvalRetryCount.delete(threadKey);
+            const resumeId = claudeSessionId || '(不明)';
             await this.slackBot.postMessage({
               channelId: session.channelId,
               threadTs: session.threadTs,
-              text: `承認リトライ上限（${MAX_APPROVAL_RETRIES}回）に達しました。権限設定を確認してください。`,
+              text: `承認リトライ上限（${MAX_APPROVAL_RETRIES}回）に達しました。\nターミナルで続行できます:\n\`\`\`\nclaude --resume ${resumeId}\n\`\`\``,
             });
             this.stateManager.updateStatus(event.sessionId, 'failed');
             this.finishSession(threadKey, event.sessionId);

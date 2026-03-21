@@ -48,12 +48,9 @@ export class CliManager extends EventEmitter {
       args.push('--allowedTools', ...params.allowedTools);
     }
 
-    // --allowedTools指定時はpermission-modeを付けない（競合回避）
-    // それ以外はデフォルトbypassPermissions、RepoConfigで上書き可能
-    if (!params.allowedTools || params.allowedTools.length === 0) {
-      const permissionMode = rc?.permissionMode || 'bypassPermissions';
-      args.push('--permission-mode', permissionMode);
-    }
+    // permission-mode: デフォルトbypassPermissions、RepoConfigで上書き可能
+    const permissionMode = rc?.permissionMode || 'bypassPermissions';
+    args.push('--permission-mode', permissionMode);
 
     // --add-dir: /tmp/ai-steward-files（常に）+ RepoConfigの追加分
     args.push('--add-dir', '/tmp/ai-steward-files');
