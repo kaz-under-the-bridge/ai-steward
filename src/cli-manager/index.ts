@@ -26,6 +26,7 @@ export class CliManager extends EventEmitter {
     cwd?: string;
     resumeClaudeSessionId?: string;
     allowedTools?: string[];
+    permissionMode?: string;
   }): Promise<CliSession> {
     const cwd = params.cwd || this.config.defaultCwd;
 
@@ -43,6 +44,10 @@ export class CliManager extends EventEmitter {
 
     if (params.allowedTools && params.allowedTools.length > 0) {
       args.push('--allowedTools', ...params.allowedTools);
+    }
+
+    if (params.permissionMode) {
+      args.push('--permission-mode', params.permissionMode);
     }
 
     // /tmp/ai-steward-files を追加ディレクトリとして許可（画像等のtmpファイル用）
