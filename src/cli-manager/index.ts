@@ -48,9 +48,11 @@ export class CliManager extends EventEmitter {
       args.push('--allowedTools', ...params.allowedTools);
     }
 
-    // RepoConfigからCLI引数を組み立て
-    if (rc?.permissionMode) {
-      args.push('--permission-mode', rc.permissionMode);
+    // --allowedTools指定時はpermission-modeを付けない（競合回避）
+    // それ以外はデフォルトbypassPermissions、RepoConfigで上書き可能
+    if (!params.allowedTools || params.allowedTools.length === 0) {
+      const permissionMode = rc?.permissionMode || 'bypassPermissions';
+      args.push('--permission-mode', permissionMode);
     }
 
     // --add-dir: /tmp/ai-steward-files（常に）+ RepoConfigの追加分
