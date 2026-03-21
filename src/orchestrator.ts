@@ -122,9 +122,20 @@ export class Orchestrator {
     if (cwd) {
       resolvedCwd = cwd;
     } else {
-      const resolved = resolveRepo(msg.text, this.config.claude.defaultCwd, this.config.claude.defaultCwd);
-      resolvedCwd = resolved.cwd;
+      // チャンネル→リポバインディングを優先
+      const boundRepo = this.config.channelRepoBindings.get(msg.channelId);
+      if (boundRepo) {
+        resolvedCwd = boundRepo;
+        log.info({ channelId: msg.channelId, cwd: boundRepo }, 'チャンネルバインディングでcwd決定');
+      } else {
+        const resolved = resolveRepo(msg.text, this.config.claude.defaultCwd, this.config.claude.defaultCwd);
+        resolvedCwd = resolved.cwd;
+      }
     }
+
+    // リポ名からpermission-modeを解決
+    const repoName = resolvedCwd.split('/').pop() || '';
+    const permissionMode = this.config.repoPermissionOverrides.get(repoName) || undefined;
 
     const sessionId = uuidv4();
 
@@ -183,6 +194,7 @@ export class Orchestrator {
         prompt,
         cwd: resolvedCwd,
         resumeClaudeSessionId,
+        permissionMode,
       });
     } catch (err) {
       log.error({ err, sessionId }, 'セッション起動失敗');

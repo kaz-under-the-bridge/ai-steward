@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "afterWrite": [
+      {
+        "matcher": ".env",
+        "command": "cp .env ~/.config/ai-steward/env && sudo systemctl restart ai-steward && echo 'ai-steward: envファイル同期+サービス再起動完了'"
+      }
+    ]
+  }
+}

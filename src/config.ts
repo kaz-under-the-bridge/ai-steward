@@ -13,6 +13,25 @@ export interface AppConfig {
   anthropicApiKey: string | null;
   dbPath: string;
   logLevel: string;
+  // リポ名 → permission-mode マッピング（未指定はdefault）
+  repoPermissionOverrides: Map<string, string>;
+  // チャンネルID → リポパス バインディング
+  channelRepoBindings: Map<string, string>;
+}
+
+/**
+ * "key1:val1,key2:val2" 形式の文字列をMapにパース
+ */
+function parseKeyValuePairs(input: string | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!input) return map;
+  for (const pair of input.split(',')) {
+    const [key, value] = pair.split(':').map((s) => s.trim());
+    if (key && value) {
+      map.set(key, value);
+    }
+  }
+  return map;
 }
 
 export function loadConfig(): AppConfig {
@@ -37,5 +56,7 @@ export function loadConfig(): AppConfig {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
     dbPath: process.env.DB_PATH || './data/steward.db',
     logLevel: process.env.LOG_LEVEL || 'info',
+    repoPermissionOverrides: parseKeyValuePairs(process.env.REPO_PERMISSION_OVERRIDES),
+    channelRepoBindings: parseKeyValuePairs(process.env.CHANNEL_REPO_BINDINGS),
   };
 }
