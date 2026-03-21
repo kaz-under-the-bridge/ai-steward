@@ -33,9 +33,9 @@ export class CliManager extends EventEmitter {
     const cwd = params.cwd || this.config.defaultCwd;
     const rc = params.repoConfig;
 
+    // プロンプトはstdinで渡す（-pの引数に直接渡すと「-」始まりのテキストがオプション誤認される）
     const args = [
       '-p',
-      params.prompt,
       '--output-format',
       'stream-json',
       '--verbose',
@@ -91,7 +91,7 @@ export class CliManager extends EventEmitter {
         ...sshEnv,
         HOME: this.config.homeDir,
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     const session: CliSession = {
@@ -102,6 +102,10 @@ export class CliManager extends EventEmitter {
     };
 
     this.sessions.set(params.sessionId, { session, process: proc });
+
+    // stdinにプロンプトを書き込んで閉じる
+    proc.stdin?.write(params.prompt);
+    proc.stdin?.end();
 
     proc.stdout?.on('data', (data: Buffer) => {
       this.emit('data', params.sessionId, data.toString());
