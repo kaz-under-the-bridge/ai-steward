@@ -77,6 +77,24 @@ export class StateManager {
     return row ? this.toSession(row) : undefined;
   }
 
+  hasRunningSessionByCwd(cwd: string): Session | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM sessions WHERE cwd = ? AND status = 'running' LIMIT 1",
+      )
+      .get(cwd) as Record<string, unknown> | undefined;
+    return row ? this.toSession(row) : undefined;
+  }
+
+  getLatestCompletedSessionByCwd(cwd: string): Session | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM sessions WHERE cwd = ? AND status = 'completed' AND claude_session_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(cwd) as Record<string, unknown> | undefined;
+    return row ? this.toSession(row) : undefined;
+  }
+
   updateStatus(sessionId: string, status: SessionStatus): void {
     this.db
       .prepare("UPDATE sessions SET status = ?, updated_at = datetime('now') WHERE session_id = ?")
