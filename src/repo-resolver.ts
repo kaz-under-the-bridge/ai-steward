@@ -3,14 +3,10 @@ import { createChildLogger } from './logger.js';
 
 const log = createChildLogger('repo-resolver');
 
-let cachedRepos: { name: string; path: string }[] | null = null;
-
 /**
- * /home/kaz/git 配下のgitリポジトリ一覧をキャッシュ付きで取得
+ * /home/kaz/git 配下のgitリポジトリ一覧を取得（毎回実行、キャッシュなし）
  */
 function getRepoList(gitRoot: string): { name: string; path: string }[] {
-  if (cachedRepos) return cachedRepos;
-
   try {
     // findはPermission deniedでexit 1を返すことがあるため、エラーでも stdout を使う
     let output: string;
@@ -27,7 +23,7 @@ function getRepoList(gitRoot: string): { name: string; path: string }[] {
       if (!output) throw execErr;
     }
 
-    cachedRepos = output
+    const repos = output
       .trim()
       .split('\n')
       .filter(Boolean)
@@ -37,19 +33,12 @@ function getRepoList(gitRoot: string): { name: string; path: string }[] {
         return { name, path: repoPath };
       });
 
-    log.info({ count: cachedRepos.length }, 'リポジトリ一覧取得');
-    return cachedRepos;
+    log.debug({ count: repos.length }, 'リポジトリ一覧取得');
+    return repos;
   } catch {
     log.warn('リポジトリ一覧の取得に失敗');
     return [];
   }
-}
-
-/**
- * キャッシュをクリア（リポジトリ追加時等）
- */
-export function clearRepoCache(): void {
-  cachedRepos = null;
 }
 
 /**
