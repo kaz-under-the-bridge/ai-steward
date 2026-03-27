@@ -8,7 +8,7 @@ import { StreamProcessor } from './stream-processor/index.js';
 import { StateManager } from './state-manager/index.js';
 import { Formatter, DEFAULT_FORMATTER_CONFIG } from './formatter/index.js';
 import { Router } from './router/index.js';
-import { resolveRepoByName, getRepoNames, clearRepoCache } from './repo-resolver.js';
+import { resolveRepoByName, getRepoNames } from './repo-resolver.js';
 import type { AppConfig } from './config.js';
 import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './types.js';
 
