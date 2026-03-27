@@ -53,6 +53,22 @@ export function clearRepoCache(): void {
 }
 
 /**
+ * リポジトリ名の一覧を返す（ルーター用）
+ */
+export function getRepoNames(gitRoot: string): string[] {
+  return getRepoList(gitRoot).map((r) => r.name);
+}
+
+/**
+ * リポ名からパスを解決する（ルーター結果からの変換用）
+ */
+export function resolveRepoByName(repoName: string, gitRoot: string): string | null {
+  const repos = getRepoList(gitRoot);
+  const match = repos.find((r) => r.name === repoName);
+  return match?.path || null;
+}
+
+/**
  * メッセージからリポジトリ名を抽出してパスを解決する
  *
  * パターン例:

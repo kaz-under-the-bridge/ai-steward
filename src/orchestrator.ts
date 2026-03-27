@@ -7,7 +7,8 @@ import { CliManager } from './cli-manager/index.js';
 import { StreamProcessor } from './stream-processor/index.js';
 import { StateManager } from './state-manager/index.js';
 import { Formatter, DEFAULT_FORMATTER_CONFIG } from './formatter/index.js';
-import { resolveRepo } from './repo-resolver.js';
+import { Router } from './router/index.js';
+import { resolveRepoByName, getRepoNames, clearRepoCache } from './repo-resolver.js';
 import type { AppConfig } from './config.js';
 import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './types.js';
 
@@ -34,6 +35,7 @@ export class Orchestrator {
   private streamProcessor: StreamProcessor;
   private stateManager: StateManager;
   private formatter: Formatter | null;
+  private router: Router | null;
   private outputBuffers: Map<string, string> = new Map();
   private runningThreads: Set<string> = new Set();
   // 実行中スレッドの現在のsessionId（kill用、key: threadKey）
@@ -66,6 +68,9 @@ export class Orchestrator {
     this.stateManager = new StateManager(config.dbPath);
     this.formatter = config.anthropicApiKey
       ? new Formatter({ ...DEFAULT_FORMATTER_CONFIG, anthropicApiKey: config.anthropicApiKey })
+      : null;
+    this.router = config.anthropicApiKey
+      ? new Router(config.anthropicApiKey, 'claude-haiku-4-5-20251001', getRepoNames(config.claude.defaultCwd))
       : null;
     this.slackBot = new SlackBot(
       {
@@ -151,14 +156,24 @@ export class Orchestrator {
       if (boundRepo) {
         resolvedCwd = boundRepo;
         log.info({ channelId: msg.channelId, cwd: boundRepo }, 'チャンネルバインディングでcwd決定');
+      } else if (this.router && msg.text) {
+        // Haikuルーターでリポ名を解決
+        const routeResult = await this.router.route(msg.text);
+        if (routeResult.repoName) {
+          const repoPath = resolveRepoByName(routeResult.repoName, this.config.claude.defaultCwd);
+          resolvedCwd = repoPath || this.config.claude.defaultCwd;
+        } else {
+          // intent=general or リポ未特定 → stewardセッション（デフォルトcwd）
+          resolvedCwd = this.config.claude.defaultCwd;
+        }
       } else {
-        const resolved = resolveRepo(msg.text, this.config.claude.defaultCwd, this.config.claude.defaultCwd);
-        resolvedCwd = resolved.cwd;
+        resolvedCwd = this.config.claude.defaultCwd;
       }
     }
 
     // 同じcwdで別スレッドが実行中なら拒否（誤操作保護）
-    if (!existingSession) {
+    // ただしデフォルトcwd（リポ未解決）の場合はスキップ（汎用チャンネルで複数会話が成立するため）
+    if (!existingSession && resolvedCwd !== this.config.claude.defaultCwd) {
       const runningSession = this.stateManager.hasRunningSessionByCwd(resolvedCwd);
       if (runningSession && `${runningSession.channelId}:${runningSession.threadTs}` !== threadKey) {
         log.info({ cwd: resolvedCwd, runningThreadTs: runningSession.threadTs }, '同じcwdで別スレッドが実行中のため拒否');
@@ -438,9 +453,11 @@ export class Orchestrator {
         // 通常完了
         const result = event.content || this.outputBuffers.get(event.sessionId) || '(出力なし)';
 
-        // Formatterがあれば要約、なければそのまま
+        // stewardセッション（デフォルトcwd）はFormatterスキップ（短い回答が多い）
+        // リポ指定セッションでFormatterがあれば要約
         let messages: string[];
-        if (this.formatter) {
+        const isStewardSession = session.cwd === this.config.claude.defaultCwd;
+        if (this.formatter && !isStewardSession) {
           const formatted = await this.formatter.format({ content: result, type: 'output' });
           messages = formatted.messages;
           if (formatted.wasSummarized) {
