@@ -19,5 +19,10 @@
     "addDirs": [
       "/home/kaz/git/github.com/kaz-under-the-bridge/money-management"
     ]
+  },
+  "product-engineering": {
+    "addDirs": [
+      "/home/kaz/git/github.com/scale-technology/pita-mock"
+    ]
   }
 }
