@@ -95,7 +95,7 @@ export class Maintenance {
   // メンテモードがアクティブなスレッド
   private activeThreads: Set<string> = new Set();
 
-  constructor(apiKey: string, model: string = 'claude-sonnet-4-20250514') {
+  constructor(apiKey: string, model: string = 'claude-sonnet-4-6') {
     this.client = new Anthropic({ apiKey });
     this.model = model;
     this.systemPrompt = this.loadSystemPrompt();
