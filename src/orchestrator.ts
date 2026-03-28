@@ -8,6 +8,7 @@ import { StreamProcessor } from './stream-processor/index.js';
 import { StateManager } from './state-manager/index.js';
 import { Formatter, DEFAULT_FORMATTER_CONFIG } from './formatter/index.js';
 import { Router } from './router/index.js';
+import { Maintenance } from './maintenance/index.js';
 import { resolveRepoByName, getRepoNames } from './repo-resolver.js';
 import type { AppConfig, RepoConfig } from './config.js';
 import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './types.js';
@@ -36,6 +37,7 @@ export class Orchestrator {
   private stateManager: StateManager;
   private formatter: Formatter | null;
   private router: Router | null;
+  private maintenance: Maintenance | null;
   private outputBuffers: Map<string, string> = new Map();
   private runningThreads: Set<string> = new Set();
   // 実行中スレッドの現在のsessionId（kill用、key: threadKey）
@@ -73,6 +75,9 @@ export class Orchestrator {
       : null;
     this.router = config.anthropicApiKey
       ? new Router(config.anthropicApiKey, 'claude-haiku-4-5-20251001', getRepoNames(config.claude.defaultCwd))
+      : null;
+    this.maintenance = config.anthropicApiKey
+      ? new Maintenance(config.anthropicApiKey)
       : null;
     this.slackBot = new SlackBot(
       {
@@ -118,9 +123,61 @@ export class Orchestrator {
   }
 
   private static readonly CANCEL_PATTERNS = /^(cancel|中止|キャンセル|stop|やめて|中断)$/i;
+  private static readonly MAINTENANCE_PATTERN = /^(メンテ[:：]\s*|maintenance[:：]?\s*)/i;
 
   private async handleMessage(msg: IncomingMessage): Promise<void> {
     const threadKey = `${msg.channelId}:${msg.threadTs}`;
+
+    // メンテナンスモード判定（キーワード起動 or 既存メンテスレッド）
+    if (this.maintenance && msg.text) {
+      const maintenanceMatch = msg.text.match(Orchestrator.MAINTENANCE_PATTERN);
+      const isMaintenanceThread = this.maintenance.isActiveThread(threadKey);
+
+      if (maintenanceMatch || isMaintenanceThread) {
+        // キーワード部分を除去してメッセージを渡す
+        const cleanText = maintenanceMatch
+          ? msg.text.replace(Orchestrator.MAINTENANCE_PATTERN, '').trim()
+          : msg.text;
+
+        if (!cleanText) {
+          await this.slackBot.postMessage({
+            channelId: msg.channelId,
+            threadTs: msg.threadTs,
+            text: 'メンテナンスモードです。調査・復旧の指示を入力してください。',
+          });
+          return;
+        }
+
+        log.info({ threadKey, isNew: !isMaintenanceThread }, 'メンテナンスモード');
+
+        await this.slackBot.postMessage({
+          channelId: msg.channelId,
+          threadTs: msg.threadTs,
+          text: isMaintenanceThread ? '確認中...' : '🔧 メンテナンスモード開始',
+        });
+
+        try {
+          const response = await this.maintenance.handle(threadKey, cleanText);
+          // Slack文字数制限対応（分割投稿）
+          const messages = this.splitMaintenanceResponse(response);
+          for (const text of messages) {
+            await this.slackBot.postMessage({
+              channelId: msg.channelId,
+              threadTs: msg.threadTs,
+              text,
+            });
+          }
+        } catch (err) {
+          log.error({ err, threadKey }, 'メンテナンスモード処理エラー');
+          await this.slackBot.postMessage({
+            channelId: msg.channelId,
+            threadTs: msg.threadTs,
+            text: `メンテナンスモードでエラーが発生しました: ${(err as Error).message}`,
+          });
+        }
+        return;
+      }
+    }
 
     if (this.runningThreads.has(threadKey)) {
       // 中断キーワードの判定
@@ -720,6 +777,25 @@ export class Orchestrator {
         log.error({ err, threadKey }, 'キューメッセージ処理失敗');
       });
     }
+  }
+
+  private splitMaintenanceResponse(text: string): string[] {
+    const MAX = 3900;
+    if (text.length <= MAX) return [text];
+
+    const messages: string[] = [];
+    let remaining = text;
+    while (remaining.length > 0) {
+      if (remaining.length <= MAX) {
+        messages.push(remaining);
+        break;
+      }
+      let splitIndex = remaining.lastIndexOf('\n', MAX);
+      if (splitIndex < MAX * 0.5) splitIndex = MAX;
+      messages.push(remaining.slice(0, splitIndex));
+      remaining = remaining.slice(splitIndex).replace(/^\n/, '');
+    }
+    return messages;
   }
 
   private truncateForSlack(text: string): string {
