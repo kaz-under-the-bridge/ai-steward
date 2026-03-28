@@ -57,10 +57,13 @@ export class Router {
         ],
       });
 
-      const text = response.content
+      let text = response.content
         .filter((c): c is Anthropic.TextBlock => c.type === 'text')
         .map((c) => c.text)
         .join('');
+
+      // Haikuが```jsonフェンスで囲む場合があるので除去
+      text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
       const parsed = JSON.parse(text) as RouteResult;
       log.info({ intent: parsed.intent, repoName: parsed.repoName, message: message.slice(0, 80) }, 'ルーティング結果');
