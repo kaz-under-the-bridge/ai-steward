@@ -27,7 +27,11 @@
   },
   "loglass-ccoe": {
     "addDirs": [
-      "/home/kaz/git/loglass/loglass-infrastructure"
+      "/home/kaz/git/loglass/loglass-infrastructure",
+      "/home/kaz/git/loglass/loglass-k8s-manifests-operators",
+      "/home/kaz/git/loglass/loglass-release",
+      "/home/kaz/git/loglass/sysdig-cspm-utils",
+      "/home/kaz/git/loglass/sysdig-vuls-utils"
     ]
   }
 }
