@@ -173,6 +173,13 @@ export class Maintenance {
       const assistantContent = response.content;
       history.push({ role: 'assistant', content: assistantContent });
 
+      // LLMの思考過程（テキスト部分）をログに記録
+      for (const block of assistantContent) {
+        if (block.type === 'text') {
+          log.info({ text: block.text.slice(0, 500) }, 'メンテモード: LLM応答');
+        }
+      }
+
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const block of assistantContent) {
         if (block.type === 'tool_use') {
@@ -207,6 +214,7 @@ export class Maintenance {
     );
     const finalText = textBlocks.map((c) => c.text).join('\n');
 
+    log.info({ text: finalText.slice(0, 500) }, 'メンテモード: 最終応答');
     history.push({ role: 'assistant', content: finalText });
 
     return finalText || '(応答なし)';
