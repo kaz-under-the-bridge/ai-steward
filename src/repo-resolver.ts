@@ -42,17 +42,35 @@ function getRepoList(gitRoot: string): { name: string; path: string }[] {
 }
 
 /**
- * リポジトリ名の一覧を返す（ルーター用）
+ * リポジトリの表示名一覧を返す（ルーター用）
+ * 親ディレクトリ/リポ名の形式で返す（例: "loglass/sysdig-vuls-utils"）
  */
 export function getRepoNames(gitRoot: string): string[] {
-  return getRepoList(gitRoot).map((r) => r.name);
+  return getRepoList(gitRoot).map((r) => {
+    const parts = r.path.replace(gitRoot, '').replace(/^\//, '').split('/');
+    // github.com/org/repo → org/repo, loglass/repo → loglass/repo
+    if (parts.length >= 3 && parts[0] === 'github.com') {
+      return `${parts[1]}/${parts[2]}`;
+    }
+    if (parts.length >= 2) {
+      return `${parts[0]}/${parts[1]}`;
+    }
+    return r.name;
+  });
 }
 
 /**
  * リポ名からパスを解決する（ルーター結果からの変換用）
+ * "org/repo" 形式も "repo" 形式も対応
  */
 export function resolveRepoByName(repoName: string, gitRoot: string): string | null {
   const repos = getRepoList(gitRoot);
+  // org/repo形式: パスの末尾がマッチするか
+  if (repoName.includes('/')) {
+    const match = repos.find((r) => r.path.endsWith(repoName));
+    return match?.path || null;
+  }
+  // repo名のみ: ディレクトリ名で完全一致
   const match = repos.find((r) => r.name === repoName);
   return match?.path || null;
 }

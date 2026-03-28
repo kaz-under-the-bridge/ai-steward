@@ -9,7 +9,7 @@ import { StateManager } from './state-manager/index.js';
 import { Formatter, DEFAULT_FORMATTER_CONFIG } from './formatter/index.js';
 import { Router } from './router/index.js';
 import { resolveRepoByName, getRepoNames } from './repo-resolver.js';
-import type { AppConfig } from './config.js';
+import type { AppConfig, RepoConfig } from './config.js';
 import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './types.js';
 
 const log = createChildLogger('orchestrator');
@@ -56,6 +56,8 @@ export class Orchestrator {
   private progressTimers: Map<string, NodeJS.Timeout> = new Map();
   // 進捗表示用のツール使用履歴（key: sessionId）
   private toolHistory: Map<string, string[]> = new Map();
+  // resumeで起動したセッションの情報（リトライ判定用、key: sessionId）
+  private resumeSessions: Map<string, { cwd: string; prompt: string; repoConfig?: RepoConfig }> = new Map();
 
   constructor(config: AppConfig) {
     this.config = config;
@@ -256,6 +258,11 @@ export class Orchestrator {
       this.sessionFiles.set(sessionId, downloadedFiles);
     }
 
+    // resumeで起動する場合、リトライ用に情報を記録
+    if (resumeClaudeSessionId) {
+      this.resumeSessions.set(sessionId, { cwd: resolvedCwd, prompt, repoConfig });
+    }
+
     try {
       await this.cliManager.spawnSession({
         sessionId,
@@ -270,6 +277,7 @@ export class Orchestrator {
       this.runningThreads.delete(threadKey);
       this.outputBuffers.delete(sessionId);
       this.cleanupSessionFiles(sessionId);
+      this.resumeSessions.delete(sessionId);
     }
   }
 
@@ -356,6 +364,7 @@ export class Orchestrator {
         if (event.content) {
           this.stateManager.updateClaudeSessionId(event.sessionId, event.content);
           this.cliManager.updateClaudeSessionId(event.sessionId, event.content);
+          this.resumeSessions.delete(event.sessionId); // resume成功、リトライ不要
           log.info({ sessionId: event.sessionId, claudeSessionId: event.content }, 'CLIセッションID取得');
         }
         break;
@@ -482,6 +491,60 @@ export class Orchestrator {
 
       case 'error': {
         this.permissionErrors.delete(event.sessionId);
+
+        // --resume付きで起動したのにinitイベントが来ずに即死した場合、resumeなしでリトライ
+        const resumeInfo = this.resumeSessions.get(event.sessionId);
+        if (resumeInfo && !session.claudeSessionId) {
+          this.resumeSessions.delete(event.sessionId);
+          log.warn({ sessionId: event.sessionId, cwd: resumeInfo.cwd }, 'resumeセッション即死、resumeなしでリトライ');
+
+          this.stateManager.updateStatus(event.sessionId, 'failed');
+          this.outputBuffers.delete(event.sessionId);
+          this.cleanupProgress(event.sessionId);
+
+          // 新しいセッションをresumeなしで起動
+          const retrySessionId = uuidv4();
+          this.stateManager.createSession({
+            sessionId: retrySessionId,
+            channelId: session.channelId,
+            threadTs: session.threadTs,
+            cwd: resumeInfo.cwd,
+          });
+          this.outputBuffers.set(retrySessionId, '');
+          this.runningSessionIds.set(threadKey, retrySessionId);
+
+          const cwdShort = resumeInfo.cwd.split('/').slice(-2).join('/');
+          const progressInfo = this.progressMessageTs.get(event.sessionId);
+          if (progressInfo) {
+            try {
+              await this.slackBot.updateMessage({
+                channelId: progressInfo.channelId,
+                ts: progressInfo.ts,
+                text: `セッション再起動中... (${cwdShort})`,
+              });
+            } catch { /* ignore */ }
+            this.progressMessageTs.set(retrySessionId, progressInfo);
+          }
+          this.progressMessageTs.delete(event.sessionId);
+          this.toolHistory.set(retrySessionId, []);
+          this.toolHistory.delete(event.sessionId);
+
+          try {
+            await this.cliManager.spawnSession({
+              sessionId: retrySessionId,
+              prompt: resumeInfo.prompt,
+              cwd: resumeInfo.cwd,
+              repoConfig: resumeInfo.repoConfig,
+            });
+          } catch (err) {
+            log.error({ err, sessionId: retrySessionId }, 'リトライ起動失敗');
+            this.stateManager.updateStatus(retrySessionId, 'failed');
+            this.finishSession(threadKey, retrySessionId);
+          }
+          break;
+        }
+
+        this.resumeSessions.delete(event.sessionId);
         await this.slackBot.postMessage({
           channelId: session.channelId,
           threadTs: session.threadTs,
@@ -640,6 +703,7 @@ export class Orchestrator {
     this.runningSessionIds.delete(threadKey);
     this.approvalRetryCount.delete(threadKey);
     this.outputBuffers.delete(sessionId);
+    this.resumeSessions.delete(sessionId);
     this.cleanupSessionFiles(sessionId);
     this.cleanupProgress(sessionId);
 
