@@ -24,5 +24,10 @@
     "addDirs": [
       "/home/kaz/git/github.com/scale-technology/pita-mock"
     ]
+  },
+  "loglass-ccoe": {
+    "addDirs": [
+      "/home/kaz/git/loglass/loglass-infrastructure"
+    ]
   }
 }
