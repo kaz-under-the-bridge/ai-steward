@@ -9,6 +9,7 @@ export interface SlackBotConfig {
   appToken: string;
   signingSecret: string;
   allowedChannelIds: string[];
+  mentionOnlyChannelIds: string[];
 }
 
 export interface SlackEventHandlers {
@@ -19,6 +20,7 @@ export interface SlackEventHandlers {
 export class SlackBot {
   private app: App;
   private config: SlackBotConfig;
+  private botUserId: string | null = null;
 
   constructor(config: SlackBotConfig, handlers: SlackEventHandlers) {
     this.config = config;
@@ -44,6 +46,14 @@ export class SlackBot {
       if (!this.config.allowedChannelIds.includes(channelId)) return;
 
       const text = ('text' in message ? message.text : '') || '';
+
+      // メンション必須チャンネルのフィルタ
+      if (this.config.mentionOnlyChannelIds.includes(channelId)) {
+        const mentionPattern = this.botUserId ? `<@${this.botUserId}>` : null;
+        if (!mentionPattern || !text.includes(mentionPattern)) {
+          return; // メンションなし → 無視
+        }
+      }
       const threadTs = ('thread_ts' in message && message.thread_ts) || message.ts;
 
       // ファイル添付の抽出
@@ -128,6 +138,16 @@ export class SlackBot {
 
   async start(): Promise<void> {
     await this.app.start();
+
+    // Bot User IDを取得（メンションフィルタ用）
+    try {
+      const auth = await this.app.client.auth.test();
+      this.botUserId = auth.user_id || null;
+      log.info({ botUserId: this.botUserId }, 'Bot User ID取得');
+    } catch (err) {
+      log.warn({ err }, 'Bot User ID取得失敗（メンションフィルタ無効）');
+    }
+
     log.info('Slack Bot 起動完了 (Socket Mode)');
   }
 

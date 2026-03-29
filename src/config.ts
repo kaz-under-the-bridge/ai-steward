@@ -13,6 +13,7 @@ export interface AppConfig {
     appToken: string;
     signingSecret: string;
     allowedChannelIds: string[];
+    mentionOnlyChannelIds: string[];
   };
   claude: {
     path: string;
@@ -74,6 +75,7 @@ export function loadConfig(): AppConfig {
       appToken: required('SLACK_APP_TOKEN'),
       signingSecret: required('SLACK_SIGNING_SECRET'),
       allowedChannelIds: required('ALLOWED_CHANNEL_IDS').split(',').map((s) => s.trim()),
+      mentionOnlyChannelIds: (process.env.MENTION_ONLY_CHANNEL_IDS || '').split(',').map((s) => s.trim()).filter(Boolean),
     },
     claude: {
       path: process.env.CLAUDE_PATH || 'claude',
