@@ -46,15 +46,16 @@ export class SlackBot {
       if (!this.config.allowedChannelIds.includes(channelId)) return;
 
       const text = ('text' in message ? message.text : '') || '';
+      const isInThread = 'thread_ts' in message && !!message.thread_ts;
+      const threadTs = ('thread_ts' in message && message.thread_ts) || message.ts;
 
-      // メンション必須チャンネルのフィルタ
-      if (this.config.mentionOnlyChannelIds.includes(channelId)) {
+      // メンション必須チャンネル: トップレベルメッセージはメンション必須、スレッド内は不要
+      if (this.config.mentionOnlyChannelIds.includes(channelId) && !isInThread) {
         const mentionPattern = this.botUserId ? `<@${this.botUserId}>` : null;
         if (!mentionPattern || !text.includes(mentionPattern)) {
           return; // メンションなし → 無視
         }
       }
-      const threadTs = ('thread_ts' in message && message.thread_ts) || message.ts;
 
       // ファイル添付の抽出
       const files: SlackFile[] = [];
