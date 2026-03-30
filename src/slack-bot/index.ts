@@ -48,6 +48,10 @@ export class SlackBot {
       if (!this.config.allowedChannelIds.includes(channelId)) return;
 
       const text = ('text' in message ? message.text : '') || '';
+
+      // "aside"で始まるメッセージは無視（チャンネル内の雑談をbotに拾わせない）
+      if (/^aside\b/i.test(text.trim())) return;
+
       const isInThread = 'thread_ts' in message && !!message.thread_ts;
       const threadTs = ('thread_ts' in message && message.thread_ts) || message.ts;
 
