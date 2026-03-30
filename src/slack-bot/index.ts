@@ -21,6 +21,8 @@ export class SlackBot {
   private app: App;
   private config: SlackBotConfig;
   private botUserId: string | null = null;
+  // メンション必須チャンネルでbot宛メンションで開始されたスレッド（key: "channelId:threadTs"）
+  private activeMentionThreads: Set<string> = new Set();
 
   constructor(config: SlackBotConfig, handlers: SlackEventHandlers) {
     this.config = config;
@@ -49,11 +51,23 @@ export class SlackBot {
       const isInThread = 'thread_ts' in message && !!message.thread_ts;
       const threadTs = ('thread_ts' in message && message.thread_ts) || message.ts;
 
-      // メンション必須チャンネル: トップレベルメッセージはメンション必須、スレッド内は不要
-      if (this.config.mentionOnlyChannelIds.includes(channelId) && !isInThread) {
+      // メンション必須チャンネルのフィルタ
+      if (this.config.mentionOnlyChannelIds.includes(channelId)) {
         const mentionPattern = this.botUserId ? `<@${this.botUserId}>` : null;
-        if (!mentionPattern || !text.includes(mentionPattern)) {
-          return; // メンションなし → 無視
+        const threadKey = `${channelId}:${threadTs}`;
+
+        if (isInThread) {
+          // スレッド内: bot宛メンションで開始されたスレッドのみ通す
+          if (!this.activeMentionThreads.has(threadKey)) {
+            return; // botが関与していないスレッド → 無視
+          }
+        } else {
+          // トップレベル: メンション必須
+          if (!mentionPattern || !text.includes(mentionPattern)) {
+            return; // メンションなし → 無視
+          }
+          // bot宛メンションで開始されたスレッドとして記録
+          this.activeMentionThreads.add(threadKey);
         }
       }
 
