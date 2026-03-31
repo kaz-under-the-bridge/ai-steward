@@ -1,0 +1,35 @@
+name: Package Security
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: '22'
+
+      # lockfile整合性検証
+      - name: Lint lockfile
+        run: |
+          npx lockfile-lint \
+            --path package-lock.json \
+            --type npm \
+            --allowed-hosts npm \
+            --validate-https \
+            --validate-integrity
+
+      # レジストリ署名検証
+      - name: Verify registry signatures
+        run: npm audit signatures
+
+      # 既知脆弱性チェック
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+        continue-on-error: true
