@@ -25,6 +25,16 @@
       "/home/kaz/git/github.com/scale-technology/pita-mock"
     ]
   },
+  "how-development-productivity-works": {
+    "addDirs": [
+      "/home/kaz/git/github.com/kaz-under-the-bridge/defend-against-supply-chain-attacks"
+    ]
+  },
+  "defend-against-supply-chain-attacks": {
+    "addDirs": [
+      "/home/kaz/git/github.com/kaz-under-the-bridge/how-development-productivity-works"
+    ]
+  },
   "loglass-ccoe": {
     "addDirs": [
       "/home/kaz/git/loglass/loglass-infrastructure",
