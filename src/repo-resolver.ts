@@ -76,6 +76,25 @@ export function resolveRepoByName(repoName: string, gitRoot: string): string | n
 }
 
 /**
+ * メッセージ冒頭のリポジトリ名をマッチしてパスを解決する
+ * ユーザーはスレッド冒頭にリポ名を書く運用ルール前提
+ *
+ * パターン: "ai-stewardの調査をして" → 冒頭の "ai-steward" をリポ名として解決
+ */
+export function resolveRepoFromPrefix(message: string, gitRoot: string): string | null {
+  // 冒頭の英数字・ハイフン・アンダースコア部分を抽出
+  const match = message.match(/^([a-zA-Z0-9][a-zA-Z0-9_-]*)/);
+  if (!match) return null;
+
+  const prefix = match[1];
+  const resolved = resolveRepoByName(prefix, gitRoot);
+  if (resolved) {
+    log.info({ prefix, repoPath: resolved }, '冒頭リポ名マッチ');
+  }
+  return resolved;
+}
+
+/**
  * メッセージからリポジトリ名を抽出してパスを解決する
  *
  * パターン例:
