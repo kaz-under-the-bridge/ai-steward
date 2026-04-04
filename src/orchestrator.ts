@@ -9,7 +9,7 @@ import { StateManager } from './state-manager/index.js';
 import { Formatter, DEFAULT_FORMATTER_CONFIG } from './formatter/index.js';
 import { Router } from './router/index.js';
 import { Maintenance } from './maintenance/index.js';
-import { resolveRepoByName, getRepoNames } from './repo-resolver.js';
+import { resolveRepoByName, resolveRepoFromPrefix, getRepoNames } from './repo-resolver.js';
 import type { AppConfig, RepoConfig } from './config.js';
 import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './types.js';
 
@@ -216,14 +216,21 @@ export class Orchestrator {
       if (boundRepo) {
         resolvedCwd = boundRepo;
         log.info({ channelId: msg.channelId, cwd: boundRepo }, 'チャンネルバインディングでcwd決定');
-      } else if (this.router && msg.text) {
-        // Haikuルーターでリポ名を解決
-        const routeResult = await this.router.route(msg.text);
-        if (routeResult.repoName) {
-          const repoPath = resolveRepoByName(routeResult.repoName, this.config.claude.defaultCwd);
-          resolvedCwd = repoPath || this.config.claude.defaultCwd;
+      } else if (msg.text) {
+        // メッセージ冒頭のリポ名マッチを優先（高速・確実）
+        const prefixMatch = resolveRepoFromPrefix(msg.text, this.config.claude.defaultCwd);
+        if (prefixMatch) {
+          resolvedCwd = prefixMatch;
+        } else if (this.router) {
+          // フォールバック: Haikuルーターでリポ名を解決
+          const routeResult = await this.router.route(msg.text);
+          if (routeResult.repoName) {
+            const repoPath = resolveRepoByName(routeResult.repoName, this.config.claude.defaultCwd);
+            resolvedCwd = repoPath || this.config.claude.defaultCwd;
+          } else {
+            resolvedCwd = this.config.claude.defaultCwd;
+          }
         } else {
-          // intent=general or リポ未特定 → stewardセッション（デフォルトcwd）
           resolvedCwd = this.config.claude.defaultCwd;
         }
       } else {
