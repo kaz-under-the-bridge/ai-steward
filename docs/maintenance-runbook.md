@@ -49,7 +49,7 @@
 | サービス名 | ai-steward |
 | systemdユニット | ai-steward.service |
 | 実行ユーザー | kaz |
-| ソースコード | /home/kaz/git/github.com/kaz-under-the-bridge/ai-steward |
+| ソースコード | /home/kaz/git/github.com/under-the-bridge-hq/ai-steward |
 | 環境変数 | ~/.config/ai-steward/env |
 | SQLite DB | ./data/steward.db (ソースルートからの相対) |
 | 一時ファイル | /tmp/ai-steward-files/ |
@@ -125,7 +125,7 @@
 - `free -h`
 
 ### Git状態
-- `cd /home/kaz/git/github.com/kaz-under-the-bridge/ai-steward && git log --oneline -5`
+- `cd /home/kaz/git/github.com/under-the-bridge-hq/ai-steward && git log --oneline -5`
 
 ### ビルド
-- `cd /home/kaz/git/github.com/kaz-under-the-bridge/ai-steward && npm run build 2>&1`
+- `cd /home/kaz/git/github.com/under-the-bridge-hq/ai-steward && npm run build 2>&1`
