@@ -1,0 +1,9 @@
+name: Security - Gitleaks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gitleaks:
+    uses: under-the-bridge-hq/shared-workflows/.github/workflows/gitleaks.yaml@main
