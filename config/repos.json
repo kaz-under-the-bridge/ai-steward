@@ -35,6 +35,16 @@
       "/home/kaz/git/github.com/under-the-bridge-hq/how-development-productivity-works"
     ]
   },
+  "utb-landing-page": {
+    "addDirs": [
+      "/home/kaz/git/github.com/under-the-bridge-hq/resume"
+    ]
+  },
+  "resume": {
+    "addDirs": [
+      "/home/kaz/git/github.com/under-the-bridge-hq/utb-landing-page"
+    ]
+  },
   "loglass-ccoe": {
     "addDirs": [
       "/home/kaz/git/loglass/loglass-infrastructure",
