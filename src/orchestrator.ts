@@ -223,6 +223,8 @@ export class Orchestrator {
           resolvedCwd = prefixMatch;
         } else if (this.router) {
           // フォールバック: Haikuルーターでリポ名を解決
+          // セッション中にcloneされたリポも見えるよう、毎回一覧を取り直す
+          this.router.updateRepoNames(getRepoNames(this.config.claude.defaultCwd));
           const routeResult = await this.router.route(msg.text);
           if (routeResult.repoName) {
             const repoPath = resolveRepoByName(routeResult.repoName, this.config.claude.defaultCwd);
