@@ -557,6 +557,19 @@ export class Orchestrator {
       case 'error': {
         this.permissionErrors.delete(event.sessionId);
 
+        // リトライ等で新セッションに置き換わった後に届いた旧セッションのエラーは通知しない
+        // （旧プロセスのexitイベントが遅れて届き、新セッションのスレッド管理を壊すのを防ぐ）
+        const currentSessionId = this.runningSessionIds.get(threadKey);
+        if (currentSessionId && currentSessionId !== event.sessionId) {
+          log.info(
+            { sessionId: event.sessionId, currentSessionId, content: event.content },
+            '置き換え済みセッションのエラーイベントを破棄',
+          );
+          this.outputBuffers.delete(event.sessionId);
+          this.resumeSessions.delete(event.sessionId);
+          break;
+        }
+
         // --resume付きで起動したのにinitイベントが来ずに即死した場合、resumeなしでリトライ
         const resumeInfo = this.resumeSessions.get(event.sessionId);
         if (resumeInfo && !session.claudeSessionId) {
