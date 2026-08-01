@@ -7,15 +7,32 @@ import type { RepoConfig } from '../config.js';
 
 const log = createChildLogger('cli-manager');
 
+// アイドル（result後・承認待ち）のプロセスを終了するまでの時間
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
 export interface CliManagerConfig {
   claudePath: string;
   defaultCwd: string;
   homeDir: string;
+  idleTimeoutMs?: number;
+}
+
+// 承認応答（control_response の response.response 部分）
+export type PermissionResponse =
+  | { behavior: 'allow'; updatedInput: Record<string, unknown>; updatedPermissions?: unknown[] }
+  | { behavior: 'deny'; message: string };
+
+interface SessionEntry {
+  session: CliSession;
+  process: ChildProcess;
+  idleTimer: NodeJS.Timeout | null;
+  // terminate()による意図的終了（exit時にエラー扱いしない）
+  terminating: boolean;
 }
 
 export class CliManager extends EventEmitter {
   private config: CliManagerConfig;
-  private sessions: Map<string, { session: CliSession; process: ChildProcess }> = new Map();
+  private sessions: Map<string, SessionEntry> = new Map();
 
   constructor(config: CliManagerConfig) {
     super();
@@ -27,15 +44,16 @@ export class CliManager extends EventEmitter {
     prompt: string;
     cwd?: string;
     resumeClaudeSessionId?: string;
-    allowedTools?: string[];
     repoConfig?: RepoConfig;
   }): Promise<CliSession> {
     const cwd = params.cwd || this.config.defaultCwd;
     const rc = params.repoConfig;
 
-    // プロンプトはstdinで渡す（-pの引数に直接渡すと「-」始まりのテキストがオプション誤認される）
+    // 双方向stream-json: stdinを開いたまま複数のuserメッセージ・control_responseを投入する
     const args = [
       '-p',
+      '--input-format',
+      'stream-json',
       '--output-format',
       'stream-json',
       '--verbose',
@@ -44,18 +62,17 @@ export class CliManager extends EventEmitter {
       'claude-fable-5',
       '--effort',
       'low',
+      // 権限要求をcontrol_request(can_use_tool)としてstdioで受ける（help非掲載フラグ、CLI v2.1.220で検証済み）
+      '--permission-prompt-tool',
+      'stdio',
     ];
 
     if (params.resumeClaudeSessionId) {
       args.push('--resume', params.resumeClaudeSessionId);
     }
 
-    if (params.allowedTools && params.allowedTools.length > 0) {
-      args.push('--allowedTools', ...params.allowedTools);
-    }
-
-    // permission-mode: デフォルトbypassPermissions、RepoConfigで上書き可能
-    const permissionMode = rc?.permissionMode || 'bypassPermissions';
+    // permission-mode: デフォルトは default（読み取り自動 + 書込等は承認）、RepoConfigで上書き可能
+    const permissionMode = rc?.permissionMode || 'default';
     args.push('--permission-mode', permissionMode);
 
     // --add-dir: /tmp/ai-steward-files（常に）+ RepoConfigの追加分
@@ -77,7 +94,7 @@ export class CliManager extends EventEmitter {
         cwd,
         prompt: params.prompt.slice(0, 100),
         resume: params.resumeClaudeSessionId || null,
-        allowedTools: params.allowedTools || null,
+        permissionMode,
         repoConfig: rc || null,
       },
       params.resumeClaudeSessionId ? 'CLI再開（--resume）' : 'CLI起動',
@@ -106,11 +123,14 @@ export class CliManager extends EventEmitter {
       createdAt: new Date(),
     };
 
-    this.sessions.set(params.sessionId, { session, process: proc });
+    const entry: SessionEntry = { session, process: proc, idleTimer: null, terminating: false };
+    this.sessions.set(params.sessionId, entry);
 
-    // stdinにプロンプトを書き込んで閉じる
-    proc.stdin?.write(params.prompt);
-    proc.stdin?.end();
+    // 最初のuserメッセージを投入（stdinは閉じない）
+    this.writeLine(entry, {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: params.prompt }] },
+    });
 
     proc.stdout?.on('data', (data: Buffer) => {
       this.emit('data', params.sessionId, data.toString());
@@ -121,18 +141,86 @@ export class CliManager extends EventEmitter {
     });
 
     proc.on('exit', (code) => {
-      log.info({ sessionId: params.sessionId, exitCode: code }, 'CLI終了');
+      const wasTerminating = this.sessions.get(params.sessionId)?.terminating ?? false;
+      log.info({ sessionId: params.sessionId, exitCode: code, terminating: wasTerminating }, 'CLI終了');
+      this.clearIdleTimer(params.sessionId);
       this.sessions.delete(params.sessionId);
-      this.emit('exit', params.sessionId, code ?? 1);
+      // 意図的終了（アイドルタイムアウト・中断）はエラー扱いさせない
+      this.emit('exit', params.sessionId, wasTerminating ? 0 : (code ?? 1));
     });
 
     proc.on('error', (err) => {
       log.error({ sessionId: params.sessionId, err }, 'CLI起動エラー');
+      this.clearIdleTimer(params.sessionId);
       this.sessions.delete(params.sessionId);
       this.emit('error', params.sessionId, err);
     });
 
     return session;
+  }
+
+  /**
+   * 常駐プロセスに追加のuserメッセージを投入する（同一スレッドの2通目以降）
+   */
+  sendUserMessage(sessionId: string, text: string): boolean {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return false;
+    this.markBusy(sessionId);
+    log.info({ sessionId, prompt: text.slice(0, 100) }, '常駐プロセスへメッセージ投入');
+    return this.writeLine(entry, {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text }] },
+    });
+  }
+
+  /**
+   * control_request(can_use_tool)への承認/拒否応答を返す
+   */
+  sendControlResponse(sessionId: string, requestId: string, response: PermissionResponse): boolean {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return false;
+    this.markBusy(sessionId);
+    log.info({ sessionId, requestId, behavior: response.behavior }, 'control_response送信');
+    return this.writeLine(entry, {
+      type: 'control_response',
+      response: { subtype: 'success', request_id: requestId, response },
+    });
+  }
+
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
+  /**
+   * アイドル状態に入った（result受信・承認待ち開始）。タイムアウトで終了させる
+   */
+  markIdle(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+    this.clearIdleTimer(sessionId);
+    const timeout = this.config.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    entry.idleTimer = setTimeout(() => {
+      log.info({ sessionId, timeoutMs: timeout }, 'アイドルタイムアウト、プロセス終了');
+      this.terminate(sessionId);
+    }, timeout);
+  }
+
+  /**
+   * 処理再開（メッセージ投入・承認応答）。アイドルタイマーを解除する
+   */
+  markBusy(sessionId: string): void {
+    this.clearIdleTimer(sessionId);
+  }
+
+  /**
+   * 意図的にプロセスを終了する（exit時にエラー扱いしない）
+   */
+  terminate(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry) {
+      entry.terminating = true;
+      entry.process.kill('SIGTERM');
+    }
   }
 
   updateClaudeSessionId(sessionId: string, claudeSessionId: string): void {
@@ -143,9 +231,21 @@ export class CliManager extends EventEmitter {
   }
 
   kill(sessionId: string): void {
+    this.terminate(sessionId);
+  }
+
+  private writeLine(entry: SessionEntry, obj: unknown): boolean {
+    const stdin = entry.process.stdin;
+    if (!stdin || stdin.destroyed) return false;
+    stdin.write(JSON.stringify(obj) + '\n');
+    return true;
+  }
+
+  private clearIdleTimer(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
-    if (entry) {
-      entry.process.kill('SIGTERM');
+    if (entry?.idleTimer) {
+      clearTimeout(entry.idleTimer);
+      entry.idleTimer = null;
     }
   }
 

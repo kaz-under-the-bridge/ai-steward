@@ -24,9 +24,9 @@ src/
 ├── slack-bot/
 │   └── index.ts          @slack/bolt Socket Mode、メッセージ・ファイル添付受信、Block Kitアクション
 ├── cli-manager/
-│   └── index.ts          child_process.spawn、--resume対話継続、--allowedTools承認後再実行
+│   └── index.ts          child_process.spawn、双方向stream-json常駐、--resume再開、アイドルタイムアウト
 ├── stream-processor/
-│   └── index.ts          NDJSONパース、init/assistant/tool_use/permission_denied/result分類
+│   └── index.ts          NDJSONパース、init/assistant/tool_use/permission_request/result分類
 ├── formatter/
 │   └── index.ts          @anthropic-ai/sdk Haiku API要約、フォールバック、メッセージ分割
 └── state-manager/
@@ -63,17 +63,22 @@ src/
 Claude Code CLIは `child_process.spawn` で起動。`node-pty` は不使用。
 
 ```bash
-# 新規セッション
-claude -p "<prompt>" --output-format stream-json --verbose
+# 常駐セッション（プロンプトはstdinにNDJSONで投入、stdinは開いたまま）
+claude -p --input-format stream-json --output-format stream-json --verbose \
+  --permission-prompt-tool stdio --permission-mode default
 
-# 対話継続（同一Slackスレッド内の2通目以降）
-claude -p "<prompt>" --resume <claude_session_id> --output-format stream-json --verbose
+# アイドルタイムアウト後の再開（同一Slackスレッドの次メッセージ）
+claude -p ... --resume <claude_session_id>
 ```
 
-stream-json出力はNDJSON形式（1行1JSONオブジェクト）。主要イベント型:
+1スレッド = 1常駐プロセス。同一スレッドの2通目以降はstdinへの追加userメッセージで
+対話継続し、アイドル（10分）で終了したら `--resume` で新規プロセス再開する。
+
+stream-json入出力はNDJSON形式（1行1JSONオブジェクト）。主要イベント型:
 - `{"type":"system","subtype":"init","session_id":"..."}` → セッションID取得
 - `{"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}` → テキスト応答
-- `{"type":"result","result":"...","is_error":false}` → 実行完了
+- `{"type":"control_request","request_id":"...","request":{"subtype":"can_use_tool",...}}` → 権限要求（Slack承認ボタン → control_responseで応答）
+- `{"type":"result","result":"...","is_error":false}` → 実行完了（プロセスは常駐継続）
 
 ### 日本語
 

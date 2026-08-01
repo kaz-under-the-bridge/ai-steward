@@ -67,6 +67,32 @@ describe('StreamProcessor', () => {
     expect(events[0].type).toBe('result');
   });
 
+  it('control_request(can_use_tool) を permission_request として構造化通知する', () => {
+    feedLine({
+      type: 'control_request',
+      request_id: 'req-1',
+      request: {
+        subtype: 'can_use_tool',
+        tool_name: 'Write',
+        input: { file_path: '/tmp/a.txt', content: 'x' },
+        permission_suggestions: [{ type: 'addRules' }],
+      },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('permission_request');
+    expect(events[0].permission).toEqual({
+      requestId: 'req-1',
+      toolName: 'Write',
+      input: { file_path: '/tmp/a.txt', content: 'x' },
+      suggestions: [{ type: 'addRules' }],
+    });
+  });
+
+  it('can_use_tool 以外の control_request は無視する', () => {
+    feedLine({ type: 'control_request', request_id: 'req-2', request: { subtype: 'other' } });
+    expect(events).toHaveLength(0);
+  });
+
   it('rate_limit_event 等の未知イベントは無視する', () => {
     feedLine({ type: 'rate_limit_event', foo: 1 });
     expect(events).toHaveLength(0);

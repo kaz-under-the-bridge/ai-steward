@@ -1,4 +1,5 @@
 import { App, LogLevel } from '@slack/bolt';
+import type { Button } from '@slack/types';
 import { createChildLogger } from '../logger.js';
 import type { IncomingMessage, ApprovalAction, SlackFile } from '../types.js';
 
@@ -116,43 +117,31 @@ export class SlackBot {
     });
 
     // 承認ボタンアクション
-    this.app.action('approval_approve', async ({ body, ack }) => {
-      await ack();
-      if (body.type !== 'block_actions') return;
-      const action = body.actions[0];
-      const sessionId = ('value' in action ? action.value : '') || '';
-      const channelId = body.channel?.id || '';
-      const threadTs = body.message?.thread_ts || body.message?.ts || '';
-      const userId = body.user.id;
+    const approvalActions = [
+      { slackActionId: 'approval_approve', actionId: 'approve' as const },
+      { slackActionId: 'approval_approve_always', actionId: 'approve_always' as const },
+      { slackActionId: 'approval_reject', actionId: 'reject' as const },
+    ];
+    for (const { slackActionId, actionId } of approvalActions) {
+      this.app.action(slackActionId, async ({ body, ack }) => {
+        await ack();
+        if (body.type !== 'block_actions') return;
+        const action = body.actions[0];
+        const approvalKey = ('value' in action ? action.value : '') || '';
+        const channelId = body.channel?.id || '';
+        const threadTs = body.message?.thread_ts || body.message?.ts || '';
+        const userId = body.user.id;
 
-      log.info({ sessionId, userId }, '承認ボタン押下');
-      await handlers.onApprovalAction({
-        channelId,
-        threadTs,
-        userId,
-        actionId: 'approve',
-        sessionId,
+        log.info({ approvalKey, userId, actionId }, '承認アクション押下');
+        await handlers.onApprovalAction({
+          channelId,
+          threadTs,
+          userId,
+          actionId,
+          approvalKey,
+        });
       });
-    });
-
-    this.app.action('approval_reject', async ({ body, ack }) => {
-      await ack();
-      if (body.type !== 'block_actions') return;
-      const action = body.actions[0];
-      const sessionId = ('value' in action ? action.value : '') || '';
-      const channelId = body.channel?.id || '';
-      const threadTs = body.message?.thread_ts || body.message?.ts || '';
-      const userId = body.user.id;
-
-      log.info({ sessionId, userId }, '拒否ボタン押下');
-      await handlers.onApprovalAction({
-        channelId,
-        threadTs,
-        userId,
-        actionId: 'reject',
-        sessionId,
-      });
-    });
+    }
   }
 
   async start(): Promise<void> {
@@ -192,8 +181,35 @@ export class SlackBot {
     channelId: string;
     threadTs: string;
     context: string;
-    sessionId: string;
+    approvalKey: string;
+    // permission_suggestionsがある場合のみ「今後も許可」ボタンを出す
+    hasSuggestions: boolean;
   }): Promise<{ ts: string }> {
+    const buttons: Button[] = [
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: '承認' },
+        style: 'primary',
+        action_id: 'approval_approve',
+        value: params.approvalKey,
+      },
+    ];
+    if (params.hasSuggestions) {
+      buttons.push({
+        type: 'button',
+        text: { type: 'plain_text', text: '今後も許可' },
+        action_id: 'approval_approve_always',
+        value: params.approvalKey,
+      });
+    }
+    buttons.push({
+      type: 'button',
+      text: { type: 'plain_text', text: '拒否' },
+      style: 'danger',
+      action_id: 'approval_reject',
+      value: params.approvalKey,
+    });
+
     const result = await this.app.client.chat.postMessage({
       channel: params.channelId,
       thread_ts: params.threadTs,
@@ -208,22 +224,7 @@ export class SlackBot {
         },
         {
           type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: '承認' },
-              style: 'primary',
-              action_id: 'approval_approve',
-              value: params.sessionId,
-            },
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: '拒否' },
-              style: 'danger',
-              action_id: 'approval_reject',
-              value: params.sessionId,
-            },
-          ],
+          elements: buttons,
         },
       ],
     });

@@ -15,18 +15,16 @@ import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './
 
 const log = createChildLogger('orchestrator');
 
-const MAX_APPROVAL_RETRIES = 1;
-
-// 承認待ち情報
+// 承認待ち情報（key: "sessionId:requestId"）
 interface PendingApproval {
   sessionId: string;
+  requestId: string;
   channelId: string;
   threadTs: string;
-  claudeSessionId: string;
-  cwd: string;
-  permissionContent: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  suggestions: unknown[];
   approvalMessageTs: string;
-  retryCount: number; // 承認リトライ回数
 }
 
 export class Orchestrator {
@@ -42,14 +40,12 @@ export class Orchestrator {
   private runningThreads: Set<string> = new Set();
   // 実行中スレッドの現在のsessionId（kill用、key: threadKey）
   private runningSessionIds: Map<string, string> = new Map();
+  // result後もアイドルで生きている常駐プロセスのsessionId（key: threadKey）
+  private liveThreadProcesses: Map<string, string> = new Map();
   // メッセージキュー（key: threadKey）
   private messageQueues: Map<string, IncomingMessage[]> = new Map();
-  // スレッド毎の承認リトライ回数（key: threadKey）
-  private approvalRetryCount: Map<string, number> = new Map();
-  // 承認待ちセッション（key: sessionId）
+  // 承認待ち（key: "sessionId:requestId"）
   private pendingApprovals: Map<string, PendingApproval> = new Map();
-  // セッション毎の権限エラー蓄積（複数回発生するため最初のものだけ使う）
-  private permissionErrors: Map<string, string> = new Map();
   // セッション毎のダウンロードファイル（完了後に削除用）
   private sessionFiles: Map<string, string[]> = new Map();
   // 「実行中...」メッセージのTS（進捗更新用、key: sessionId）
@@ -103,6 +99,9 @@ export class Orchestrator {
 
     this.cliManager.on('exit', (sessionId: string, exitCode: number) => {
       this.streamProcessor.notifyExit(sessionId, exitCode);
+      this.handleProcessExit(sessionId).catch((err) => {
+        log.error({ err, sessionId }, 'プロセス終了処理でエラー');
+      });
     });
 
     this.cliManager.on('error', (sessionId: string, err: Error) => {
@@ -201,7 +200,20 @@ export class Orchestrator {
     }
 
     // 「新規」キーワードで強制新セッション
-    const forceNew = msg.text && /^(新規セッション|new session|reset session)$/i.test(msg.text.trim());
+    const forceNew = !!msg.text && /^(新規セッション|new session|reset session)$/i.test(msg.text.trim());
+
+    // 常駐プロセスが生きていれば同一プロセスに追送（再起動なしの対話継続）
+    const liveSessionId = this.liveThreadProcesses.get(threadKey);
+    if (liveSessionId && !forceNew && this.cliManager.hasSession(liveSessionId)) {
+      const sent = await this.continueLiveSession(liveSessionId, threadKey, msg);
+      if (sent) return;
+      // 追送失敗（プロセス消滅）→ 通常の起動フローへ
+      this.liveThreadProcesses.delete(threadKey);
+    }
+    if (forceNew && liveSessionId) {
+      this.cliManager.terminate(liveSessionId);
+      this.liveThreadProcesses.delete(threadKey);
+    }
 
     const existingSession = this.stateManager.getSessionByThread(msg.channelId, msg.threadTs);
     let resumeClaudeSessionId = existingSession?.claudeSessionId || undefined;
@@ -296,34 +308,7 @@ export class Orchestrator {
     this.progressMessageTs.set(sessionId, { channelId: msg.channelId, ts: progressTs });
     this.toolHistory.set(sessionId, []);
 
-    // ファイル添付の処理（画像等）
-    let prompt = msg.text;
-    const downloadedFiles: string[] = [];
-
-    if (msg.files.length > 0) {
-      const tmpDir = '/tmp/ai-steward-files';
-      mkdirSync(tmpDir, { recursive: true });
-
-      for (const file of msg.files) {
-        try {
-          const localPath = await this.downloadSlackFile(file, tmpDir);
-          downloadedFiles.push(localPath);
-          log.info({ fileName: file.name, localPath }, 'ファイルダウンロード完了');
-        } catch (err) {
-          log.error({ err, fileName: file.name }, 'ファイルダウンロード失敗');
-        }
-      }
-
-      if (downloadedFiles.length > 0) {
-        const filePaths = downloadedFiles.map((p) => p).join(', ');
-        prompt = `${prompt || '添付ファイルを確認してください'}\n\n添付ファイル: ${filePaths}`;
-      }
-    }
-
-    // セッション毎にダウンロードファイルを記録（後で削除用）
-    if (downloadedFiles.length > 0) {
-      this.sessionFiles.set(sessionId, downloadedFiles);
-    }
+    const prompt = await this.buildPromptWithFiles(sessionId, msg);
 
     // resumeで起動する場合、リトライ用に情報を記録
     if (resumeClaudeSessionId) {
@@ -348,75 +333,177 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * 常駐プロセスへ追加メッセージを投入して対話を継続する
+   */
+  private async continueLiveSession(
+    sessionId: string,
+    threadKey: string,
+    msg: IncomingMessage,
+  ): Promise<boolean> {
+    const session = this.stateManager.getSession(sessionId);
+    if (!session) return false;
+
+    const prompt = await this.buildPromptWithFiles(sessionId, msg);
+
+    this.outputBuffers.set(sessionId, '');
+    this.runningThreads.add(threadKey);
+    this.runningSessionIds.set(threadKey, sessionId);
+    this.stateManager.updateStatus(sessionId, 'running');
+
+    const sent = this.cliManager.sendUserMessage(sessionId, prompt);
+    if (!sent) {
+      // プロセス消滅 → 呼び出し元で通常起動にフォールバック
+      this.runningThreads.delete(threadKey);
+      this.runningSessionIds.delete(threadKey);
+      this.outputBuffers.delete(sessionId);
+      this.cleanupSessionFiles(sessionId);
+      return false;
+    }
+
+    const cwdShort = session.cwd.split('/').slice(-2).join('/');
+    const { ts: progressTs } = await this.slackBot.postMessage({
+      channelId: msg.channelId,
+      threadTs: msg.threadTs,
+      text: `継続実行中... (${cwdShort})`,
+    });
+    this.progressMessageTs.set(sessionId, { channelId: msg.channelId, ts: progressTs });
+    this.toolHistory.set(sessionId, []);
+    log.info({ sessionId, threadKey }, '常駐プロセスで対話継続');
+    return true;
+  }
+
+  /**
+   * ファイル添付をダウンロードしてプロンプトに反映する
+   */
+  private async buildPromptWithFiles(sessionId: string, msg: IncomingMessage): Promise<string> {
+    let prompt = msg.text;
+    const downloadedFiles: string[] = [];
+
+    if (msg.files.length > 0) {
+      const tmpDir = '/tmp/ai-steward-files';
+      mkdirSync(tmpDir, { recursive: true });
+
+      for (const file of msg.files) {
+        try {
+          const localPath = await this.downloadSlackFile(file, tmpDir);
+          downloadedFiles.push(localPath);
+          log.info({ fileName: file.name, localPath }, 'ファイルダウンロード完了');
+        } catch (err) {
+          log.error({ err, fileName: file.name }, 'ファイルダウンロード失敗');
+        }
+      }
+
+      if (downloadedFiles.length > 0) {
+        const filePaths = downloadedFiles.join(', ');
+        prompt = `${prompt || '添付ファイルを確認してください'}\n\n添付ファイル: ${filePaths}`;
+      }
+    }
+
+    // セッション毎にダウンロードファイルを記録（後で削除用）
+    if (downloadedFiles.length > 0) {
+      const existing = this.sessionFiles.get(sessionId) || [];
+      this.sessionFiles.set(sessionId, [...existing, ...downloadedFiles]);
+    }
+
+    return prompt;
+  }
+
   private async handleApprovalAction(action: ApprovalAction): Promise<void> {
-    const pending = this.pendingApprovals.get(action.sessionId);
+    const pending = this.pendingApprovals.get(action.approvalKey);
     if (!pending) {
-      log.warn({ sessionId: action.sessionId }, '承認リクエストが見つかりません');
+      log.warn({ approvalKey: action.approvalKey }, '承認リクエストが見つかりません（期限切れ）');
+      await this.slackBot.postMessage({
+        channelId: action.channelId,
+        threadTs: action.threadTs,
+        text: 'この承認は期限切れです。同じスレッドで再依頼してください。',
+      });
       return;
     }
 
-    this.pendingApprovals.delete(action.sessionId);
+    this.pendingApprovals.delete(action.approvalKey);
 
     if (action.actionId === 'reject') {
-      // 拒否 → ボタンを更新して終了
       await this.slackBot.updateMessage({
         channelId: pending.channelId,
         ts: pending.approvalMessageTs,
-        text: `拒否されました (by <@${action.userId}>)`,
+        text: `拒否されました (by <@${action.userId}>): ${pending.toolName}`,
       });
-      log.info({ sessionId: action.sessionId }, '承認拒否');
+      const sent = this.cliManager.sendControlResponse(pending.sessionId, pending.requestId, {
+        behavior: 'deny',
+        message: 'ユーザーがSlack上で拒否しました。この操作は行わず、代替案があれば提示してください。',
+      });
+      if (!sent) await this.notifyApprovalProcessGone(pending);
+      log.info({ approvalKey: action.approvalKey }, '承認拒否');
       return;
     }
 
-    // 承認 → ボタンを更新
+    // 承認（今回のみ / 今後も許可）
+    const alwaysLabel = action.actionId === 'approve_always' ? '・今後も許可' : '';
     await this.slackBot.updateMessage({
       channelId: pending.channelId,
       ts: pending.approvalMessageTs,
-      text: `承認されました (by <@${action.userId}>)`,
+      text: `承認されました (by <@${action.userId}>${alwaysLabel}): ${pending.toolName}`,
     });
 
-    // リトライカウントをインクリメント
-    const threadKey = `${pending.channelId}:${pending.threadTs}`;
-    this.approvalRetryCount.set(threadKey, pending.retryCount + 1);
-
-    log.info({ sessionId: action.sessionId, retryCount: pending.retryCount + 1 }, '承認OK、--allowedTools付きで再実行');
-
-    // 許可するツールを権限エラーメッセージから抽出
-    const allowedTools = this.extractAllowedTools(pending.permissionContent);
-
-    // 新しいセッションを作成して--resume + --allowedToolsで再実行
-    const newSessionId = uuidv4();
-
-    this.stateManager.createSession({
-      sessionId: newSessionId,
-      channelId: pending.channelId,
-      threadTs: pending.threadTs,
-      cwd: pending.cwd,
+    const sent = this.cliManager.sendControlResponse(pending.sessionId, pending.requestId, {
+      behavior: 'allow',
+      updatedInput: pending.input,
+      ...(action.actionId === 'approve_always' && pending.suggestions.length > 0
+        ? { updatedPermissions: pending.suggestions }
+        : {}),
     });
+    if (!sent) await this.notifyApprovalProcessGone(pending);
+    log.info({ approvalKey: action.approvalKey, actionId: action.actionId }, '承認OK、control_response送信');
+  }
 
-    this.outputBuffers.set(newSessionId, '');
-    this.runningThreads.add(threadKey);
-    this.runningSessionIds.set(threadKey, newSessionId);
-
+  private async notifyApprovalProcessGone(pending: PendingApproval): Promise<void> {
     await this.slackBot.postMessage({
       channelId: pending.channelId,
       threadTs: pending.threadTs,
-      text: '承認済み、再実行中...',
+      text: 'セッションのプロセスが既に終了していました。同じスレッドで再依頼すると続きから再開します。',
     });
+  }
 
-    try {
-      await this.cliManager.spawnSession({
-        sessionId: newSessionId,
-        prompt: '先ほどの作業を続けてください。権限が許可されました。',
-        cwd: pending.cwd,
-        resumeClaudeSessionId: pending.claudeSessionId,
-        allowedTools,
+  /**
+   * CLIプロセス終了時の後片付け（アイドルタイムアウト・承認期限切れの通知を含む）
+   */
+  private async handleProcessExit(sessionId: string): Promise<void> {
+    const session = this.stateManager.getSession(sessionId);
+    if (!session) return;
+    const threadKey = `${session.channelId}:${session.threadTs}`;
+
+    if (this.liveThreadProcesses.get(threadKey) === sessionId) {
+      this.liveThreadProcesses.delete(threadKey);
+    }
+
+    // 承認待ちのままプロセスが終了した場合（アイドルタイムアウト）
+    const expired = Array.from(this.pendingApprovals.entries()).filter(
+      ([, p]) => p.sessionId === sessionId,
+    );
+    if (expired.length === 0) return;
+
+    for (const [key, p] of expired) {
+      this.pendingApprovals.delete(key);
+      try {
+        await this.slackBot.updateMessage({
+          channelId: p.channelId,
+          ts: p.approvalMessageTs,
+          text: `承認待ちのままタイムアウトしました（期限切れ）: ${p.toolName}`,
+        });
+      } catch (err) {
+        log.warn({ err, sessionId }, '承認メッセージ更新失敗');
+      }
+    }
+
+    if (this.runningSessionIds.get(threadKey) === sessionId) {
+      await this.slackBot.postMessage({
+        channelId: session.channelId,
+        threadTs: session.threadTs,
+        text: '承認待ちのままタイムアウトしたため中断しました。同じスレッドで再依頼すると続きから再開します。',
       });
-    } catch (err) {
-      log.error({ err, sessionId: newSessionId }, '再実行失敗');
-      this.stateManager.updateStatus(newSessionId, 'failed');
-      this.runningThreads.delete(threadKey);
-      this.outputBuffers.delete(newSessionId);
+      this.stateManager.updateStatus(sessionId, 'failed');
+      this.finishSession(threadKey, sessionId);
     }
   }
 
@@ -453,80 +540,39 @@ export class Orchestrator {
         break;
       }
 
-      case 'permission_denied': {
-        // 最初の権限エラーだけ記録（CLIが複数回リトライするため）
-        if (!this.permissionErrors.has(event.sessionId)) {
-          this.permissionErrors.set(event.sessionId, event.content);
-          log.info({ sessionId: event.sessionId, content: event.content }, '権限エラー検知');
-        }
+      case 'permission_request': {
+        const p = event.permission;
+        if (!p) break;
+        const approvalKey = `${event.sessionId}:${p.requestId}`;
+        const inputSummary = this.truncateInput(JSON.stringify(p.input, null, 2));
+        const context = `ツール: \`${p.toolName}\`\n\`\`\`${inputSummary}\`\`\``;
+
+        const { ts } = await this.slackBot.postApprovalRequest({
+          channelId: session.channelId,
+          threadTs: session.threadTs,
+          context,
+          approvalKey,
+          hasSuggestions: p.suggestions.length > 0,
+        });
+
+        this.pendingApprovals.set(approvalKey, {
+          sessionId: event.sessionId,
+          requestId: p.requestId,
+          channelId: session.channelId,
+          threadTs: session.threadTs,
+          toolName: p.toolName,
+          input: p.input,
+          suggestions: p.suggestions,
+          approvalMessageTs: ts,
+        });
+
+        // 承認待ちもアイドルタイムアウトの対象にする（放置でプロセス終了）
+        this.cliManager.markIdle(event.sessionId);
+        log.info({ approvalKey, toolName: p.toolName }, '承認ボタンを表示');
         break;
       }
 
       case 'result': {
-        // 権限エラーがあった場合は承認フローに移行
-        const permError = this.permissionErrors.get(event.sessionId);
-        if (permError) {
-          this.permissionErrors.delete(event.sessionId);
-
-          const claudeSessionId = session.claudeSessionId;
-
-          // sensitive fileはai-steward経由では対応不可 → session ID案内
-          if (permError.includes('sensitive file') && claudeSessionId) {
-            log.info({ sessionId: event.sessionId, claudeSessionId }, 'sensitive file検知、セッションID案内');
-            await this.slackBot.postMessage({
-              channelId: session.channelId,
-              threadTs: session.threadTs,
-              text: `この操作はai-steward経由では実行できません（sensitive file）。\nターミナルで続行できます:\n\`\`\`\nclaude --resume ${claudeSessionId}\n\`\`\``,
-            });
-            this.stateManager.updateStatus(event.sessionId, 'completed');
-            this.finishSession(threadKey, event.sessionId);
-            break;
-          }
-
-          const retryCount = this.approvalRetryCount.get(threadKey) || 0;
-
-          if (claudeSessionId && retryCount < MAX_APPROVAL_RETRIES) {
-            // Slack に承認ボタンを投稿
-            const { ts } = await this.slackBot.postApprovalRequest({
-              channelId: session.channelId,
-              threadTs: session.threadTs,
-              context: permError,
-              sessionId: event.sessionId,
-            });
-
-            this.pendingApprovals.set(event.sessionId, {
-              sessionId: event.sessionId,
-              channelId: session.channelId,
-              threadTs: session.threadTs,
-              claudeSessionId,
-              cwd: session.cwd,
-              permissionContent: permError,
-              approvalMessageTs: ts,
-              retryCount,
-            });
-
-            this.stateManager.updateStatus(event.sessionId, 'completed');
-            this.runningThreads.delete(threadKey);
-            this.runningSessionIds.delete(threadKey);
-            this.outputBuffers.delete(event.sessionId);
-            log.info({ sessionId: event.sessionId, retryCount }, '承認ボタンを表示');
-            break;
-          } else if (retryCount >= MAX_APPROVAL_RETRIES) {
-            // リトライ上限超過 → session ID案内
-            log.warn({ sessionId: event.sessionId, retryCount }, '承認リトライ上限超過');
-            const resumeId = claudeSessionId || '(不明)';
-            await this.slackBot.postMessage({
-              channelId: session.channelId,
-              threadTs: session.threadTs,
-              text: `承認リトライ上限（${MAX_APPROVAL_RETRIES}回）に達しました。\nターミナルで続行できます:\n\`\`\`\nclaude --resume ${resumeId}\n\`\`\``,
-            });
-            this.stateManager.updateStatus(event.sessionId, 'failed');
-            this.finishSession(threadKey, event.sessionId);
-            break;
-          }
-        }
-
-        // 通常完了
         const result = event.content || this.outputBuffers.get(event.sessionId) || '(出力なし)';
 
         // stewardセッション（デフォルトcwd）はFormatterスキップ（短い回答が多い）
@@ -553,12 +599,16 @@ export class Orchestrator {
 
         this.stateManager.updateStatus(event.sessionId, 'completed');
         this.finishSession(threadKey, event.sessionId);
+
+        // プロセスは生かしたまま常駐させる（次メッセージは同一プロセスへ追送）
+        if (this.cliManager.hasSession(event.sessionId)) {
+          this.liveThreadProcesses.set(threadKey, event.sessionId);
+          this.cliManager.markIdle(event.sessionId);
+        }
         break;
       }
 
       case 'error': {
-        this.permissionErrors.delete(event.sessionId);
-
         // リトライ等で新セッションに置き換わった後に届いた旧セッションのエラーは通知しない
         // （旧プロセスのexitイベントが遅れて届き、新セッションのスレッド管理を壊すのを防ぐ）
         const currentSessionId = this.runningSessionIds.get(threadKey);
@@ -636,32 +686,6 @@ export class Orchestrator {
         break;
       }
     }
-  }
-
-  /**
-   * 権限エラーメッセージからツール名を抽出
-   * "Claude requested permissions to write to /path/to/file" → ["Write"]
-   * "Claude requested permissions to run Bash command" → ["Bash"]
-   */
-  private extractAllowedTools(permissionContent: string): string[] {
-    const tools: string[] = [];
-    if (permissionContent.includes('write to') || permissionContent.includes('Write')) {
-      tools.push('Write');
-    }
-    if (permissionContent.includes('edit') || permissionContent.includes('Edit')) {
-      tools.push('Edit');
-    }
-    if (permissionContent.includes('Bash') || permissionContent.includes('run')) {
-      tools.push('Bash');
-    }
-    if (permissionContent.includes('Read')) {
-      tools.push('Read');
-    }
-    // フォールバック: ツールが特定できなかった場合はWrite+Editを許可
-    if (tools.length === 0) {
-      tools.push('Write', 'Edit');
-    }
-    return tools;
   }
 
   private async downloadSlackFile(file: SlackFile, tmpDir: string): Promise<string> {
@@ -764,12 +788,16 @@ export class Orchestrator {
   private async handleCancel(threadKey: string, msg: IncomingMessage): Promise<void> {
     const sessionId = this.runningSessionIds.get(threadKey);
     if (sessionId) {
-      this.cliManager.kill(sessionId);
+      this.cliManager.terminate(sessionId);
+      this.stateManager.updateStatus(sessionId, 'failed');
       log.info({ threadKey, sessionId }, '中断リクエスト');
     }
 
     // キューもクリア
     this.messageQueues.delete(threadKey);
+    if (sessionId) {
+      this.finishSession(threadKey, sessionId);
+    }
 
     await this.slackBot.postMessage({
       channelId: msg.channelId,
@@ -781,7 +809,6 @@ export class Orchestrator {
   private finishSession(threadKey: string, sessionId: string): void {
     this.runningThreads.delete(threadKey);
     this.runningSessionIds.delete(threadKey);
-    this.approvalRetryCount.delete(threadKey);
     this.outputBuffers.delete(sessionId);
     this.resumeSessions.delete(sessionId);
     this.cleanupSessionFiles(sessionId);
@@ -827,6 +854,12 @@ export class Orchestrator {
     const head = text.slice(0, Math.floor(MAX * 0.6));
     const tail = text.slice(-Math.floor(MAX * 0.3));
     return `${head}\n\n... (${text.length - head.length - tail.length}文字省略) ...\n\n${tail}`;
+  }
+
+  private truncateInput(text: string): string {
+    const MAX = 1500;
+    if (text.length <= MAX) return text;
+    return `${text.slice(0, MAX)}\n... (${text.length - MAX}文字省略)`;
   }
 
   async start(): Promise<void> {

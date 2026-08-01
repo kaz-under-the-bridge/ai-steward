@@ -1,81 +1,56 @@
-# Approval Flow モジュール設計
+# Approval Flow 設計
 
-## 責務
+承認フローは独立モジュールではなくorchestrator内に実装されている
+（pendingApprovals管理 + Slack Bot / CLI Managerへの依頼）。
 
-- 承認プロンプトのコンテキスト抽出
-- Block Kitボタンの内容生成
-- ユーザー応答の処理とCLI入力への変換
-- 承認タイムアウト管理
+## 仕組み
 
-## 境界
+`--permission-prompt-tool stdio` により、権限が必要なツール実行はCLIが
+`control_request`（subtype: `can_use_tool`）として構造化通知してくる。
+プロセスは応答が来るまでツール実行を保留したまま生存する。
 
-- Stream Processorからの承認イベントを受ける
-- Slack BotへBlock Kit送信を依頼（直接Slack API不使用）
-- CLI Managerへstdin書き込みを依頼
-
-## インターフェース
-
-```typescript
-interface ApprovalFlowConfig {
-  timeoutMs: number;  // default: 300000 (5分)
-}
-
-interface PendingApproval {
-  sessionId: string;
-  channelId: string;
-  threadTs: string;
-  context: string;
-  messageTs: string;     // Block KitメッセージTS
-  createdAt: Date;
-  timer: NodeJS.Timeout;
-}
-
-interface ApprovalFlow {
-  requestApproval(params: {
-    sessionId: string;
-    channelId: string;
-    threadTs: string;
-    promptContent: string;
-  }): Promise<void>;
-
-  handleResponse(params: {
-    sessionId: string;
-    approved: boolean;
-    userId: string;
-  }): Promise<void>;
-
-  cancelPending(sessionId: string): void;
-  getPending(sessionId: string): PendingApproval | undefined;
-}
+```
+CLI ──control_request──▶ Stream Processor ──permission_request──▶ Orchestrator
+                                                                      │ Block Kit投稿
+Slack ◀───────────────────────────────────────────────────────────────┘
+  │ ボタン押下
+  ▼
+Orchestrator ──sendControlResponse(allow/deny)──▶ CLI Manager ──stdin──▶ CLI（実行続行）
 ```
 
-## 承認タイムアウト
+## 承認要求の内容
 
-タイムアウト時は自動拒否（N）を送信し、Slack上のボタンを「タイムアウト（自動拒否）」に更新。
+`control_request` には以下が含まれ、Slackの承認ボタンにツール名とinput全文
+（1500字で切り詰め）を表示する:
 
-## ユーザー応答処理
+- `tool_name`: ツール名（Write / Bash 等）
+- `input`: ツール入力の全文
+- `permission_suggestions`: CLIが提示する許可ルール候補
 
-1. タイマーキャンセル
-2. CLI Managerにy/N送信
-3. State Manager状態更新
-4. Slackメッセージ更新（ボタン→結果テキスト）
+## ボタンと応答
 
-## 承認イベントの検知方法
+| ボタン | control_response |
+|--------|------------------|
+| 承認 | `{behavior: "allow", updatedInput: <元のinput>}` |
+| 今後も許可（suggestionsがある場合のみ表示） | 上記 + `updatedPermissions: <permission_suggestions>` |
+| 拒否 | `{behavior: "deny", message: "ユーザーがSlack上で拒否しました..."}` |
 
-stream-jsonモードでの承認イベントの形式はMVP4で実機検証して確定する。
-考えられるパターン:
-- 専用のJSONイベント型（permission_request等）
-- assistantメッセージ内のテキストパターン（(y/N)等）
+拒否してもプロセスは生きたままで、本体が拒否を認識して代替案を応答する。
+1タスク中に承認が複数回発生しても、その都度ボタンが出る
+（key: `sessionId:requestId` で個別管理）。
+
+## タイムアウト
+
+承認待ちはアイドルタイムアウト（10分）の対象。放置するとプロセスが終了し、
+
+- 承認ボタンは「タイムアウトしました（期限切れ）」に更新
+- スレッドに中断通知（同一スレッドで再依頼すると `--resume` で続きから再開）
+- 期限切れ後にボタンを押した場合は「期限切れです」と案内
 
 ## エラーハンドリング
 
 | エラー | 対処 |
 |--------|------|
-| 応答時にセッション不在 | Slackメッセージを「終了済み」に更新 |
-| ボタン二重クリック | pending不在なら無視 |
+| 応答時にプロセス消滅 | 「プロセスが終了していました。再依頼で再開」を通知 |
+| ボタン二重クリック | pending不在なら期限切れ案内 |
 | タイムアウト+応答の競合 | Map.deleteで排他（シングルスレッド） |
-
-## 依存関係
-
-- 外部: なし
-- 内部: Slack Bot, CLI Manager, State Manager（依存注入で受け取る）
