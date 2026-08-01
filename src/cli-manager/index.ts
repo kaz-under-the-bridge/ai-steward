@@ -39,6 +39,11 @@ export class CliManager extends EventEmitter {
       '--output-format',
       'stream-json',
       '--verbose',
+      // settings.jsonのmodel設定に依存させず、bot用のモデル/effortを固定する
+      '--model',
+      'claude-fable-5',
+      '--effort',
+      'low',
     ];
 
     if (params.resumeClaudeSessionId) {
