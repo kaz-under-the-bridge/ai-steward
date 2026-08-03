@@ -13,6 +13,7 @@ import { Maintenance } from './maintenance/index.js';
 import { resolveRepoByName, resolveRepoFromPrefix, getRepoNames } from './repo-resolver.js';
 import { redactSecrets } from './redaction.js';
 import { formatElapsed, formatTokenCount, elapsedSinceSqliteUtc } from './format-utils.js';
+import { getGitTaskInfo } from './git-info.js';
 import type { AppConfig, RepoConfig } from './config.js';
 import type {
   IncomingMessage,
@@ -69,6 +70,8 @@ export class Orchestrator {
   private usageTotals = { tasks: 0, inputTokens: 0, outputTokens: 0, durationMs: 0 };
   // wall-clockタイムアウトタイマー（key: sessionId）
   private wallClockTimers: Map<string, NodeJS.Timeout> = new Map();
+  // タスク開始時刻（PRリンクの誤検出防止用、key: sessionId）
+  private taskStartedAt: Map<string, Date> = new Map();
   // 再起動復旧後のセッションで、最初に一致したツール要求を自動承認する（key: sessionId）
   private autoApprovals: Map<string, AutoApproval> = new Map();
   // セッション毎のダウンロードファイル（完了後に削除用）
@@ -1032,6 +1035,19 @@ export class Orchestrator {
           });
         }
 
+        // PRを作ったタスクにはgitの確定情報からPRリンクを添える（応答テキストの正規表現に頼らない）
+        const startedAt = this.taskStartedAt.get(event.sessionId);
+        if (startedAt && !isStewardSession) {
+          const gitInfo = await getGitTaskInfo(session.cwd, startedAt);
+          if (gitInfo?.prUrl) {
+            await this.slackBot.postMessage({
+              channelId: session.channelId,
+              threadTs: session.threadTs,
+              text: `🔗 PR: ${gitInfo.prUrl} (\`${gitInfo.branch}\` @ ${gitInfo.shortSha})`,
+            });
+          }
+        }
+
         this.collectUsage(threadKey, event.raw);
         log.info(this.ctx(event.sessionId), 'タスク完了');
         this.stateManager.updateStatus(event.sessionId, 'completed');
@@ -1272,6 +1288,8 @@ export class Orchestrator {
    */
   private startWallClockTimer(sessionId: string, threadKey: string): void {
     this.clearWallClockTimer(sessionId);
+    // すべてのタスク開始経路がここを通るため、タスク開始時刻もここで記録する
+    this.taskStartedAt.set(sessionId, new Date());
     const timeoutMinutes = this.config.claude.sessionTimeoutMinutes;
     const timer = setTimeout(() => {
       this.wallClockTimers.delete(sessionId);
@@ -1318,6 +1336,7 @@ export class Orchestrator {
     this.cleanupSessionFiles(sessionId);
     this.cleanupProgress(sessionId);
     this.clearWallClockTimer(sessionId);
+    this.taskStartedAt.delete(sessionId);
 
     // スレッド内キューに待ちメッセージがあれば次を実行
     const queue = this.messageQueues.get(threadKey);
