@@ -6,6 +6,7 @@ import { SlackBot } from './slack-bot/index.js';
 import { CliManager } from './cli-manager/index.js';
 import { StreamProcessor } from './stream-processor/index.js';
 import { StateManager } from './state-manager/index.js';
+import type { PendingApprovalRecord } from './state-manager/index.js';
 import { Formatter, DEFAULT_FORMATTER_CONFIG } from './formatter/index.js';
 import { Router } from './router/index.js';
 import { Maintenance } from './maintenance/index.js';
@@ -15,16 +16,12 @@ import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './
 
 const log = createChildLogger('orchestrator');
 
-// 承認待ち情報（key: "sessionId:requestId"）
-interface PendingApproval {
-  sessionId: string;
-  requestId: string;
-  channelId: string;
-  threadTs: string;
+// 再起動復旧時の自動承認（key: 復旧後のsessionId）
+interface AutoApproval {
   toolName: string;
-  input: Record<string, unknown>;
+  always: boolean;
   suggestions: unknown[];
-  approvalMessageTs: string;
+  expiresAt: number;
 }
 
 export class Orchestrator {
@@ -44,8 +41,8 @@ export class Orchestrator {
   private liveThreadProcesses: Map<string, string> = new Map();
   // メッセージキュー（key: threadKey）
   private messageQueues: Map<string, IncomingMessage[]> = new Map();
-  // 承認待ち（key: "sessionId:requestId"）
-  private pendingApprovals: Map<string, PendingApproval> = new Map();
+  // 再起動復旧後のセッションで、最初に一致したツール要求を自動承認する（key: sessionId）
+  private autoApprovals: Map<string, AutoApproval> = new Map();
   // セッション毎のダウンロードファイル（完了後に削除用）
   private sessionFiles: Map<string, string[]> = new Map();
   // 「実行中...」メッセージのTS（進捗更新用、key: sessionId）
@@ -218,6 +215,13 @@ export class Orchestrator {
     }
 
     const existingSession = this.stateManager.getSessionByThread(msg.channelId, msg.threadTs);
+
+    // 承認待ちのまま残った旧セッションは、新しい依頼で置き換える（ボタンは期限切れに）
+    if (existingSession?.status === 'waiting_approval') {
+      await this.expireApprovals(existingSession.sessionId, '新しい依頼により期限切れ');
+      this.stateManager.updateStatus(existingSession.sessionId, 'failed');
+    }
+
     let resumeClaudeSessionId = existingSession?.claudeSessionId || undefined;
     const cwd = existingSession?.cwd || undefined;
 
@@ -412,7 +416,7 @@ export class Orchestrator {
   }
 
   private async handleApprovalAction(action: ApprovalAction): Promise<void> {
-    const pending = this.pendingApprovals.get(action.approvalKey);
+    const pending = this.stateManager.getPendingApproval(action.approvalKey);
     if (!pending) {
       log.warn({ approvalKey: action.approvalKey }, '承認リクエストが見つかりません（期限切れ）');
       await this.slackBot.postMessage({
@@ -423,7 +427,13 @@ export class Orchestrator {
       return;
     }
 
-    this.pendingApprovals.delete(action.approvalKey);
+    this.stateManager.deletePendingApproval(action.approvalKey);
+
+    // プロセスが既に居ない（再起動 or アイドル終了）→ --resumeで復旧
+    if (!this.cliManager.hasSession(pending.sessionId)) {
+      await this.resumeInterruptedApproval(pending, action);
+      return;
+    }
 
     if (action.actionId === 'reject') {
       await this.slackBot.updateMessage({
@@ -436,6 +446,7 @@ export class Orchestrator {
         message: 'ユーザーがSlack上で拒否しました。この操作は行わず、代替案があれば提示してください。',
       });
       if (!sent) await this.notifyApprovalProcessGone(pending);
+      else this.stateManager.updateStatus(pending.sessionId, 'running');
       log.info({ approvalKey: action.approvalKey }, '承認拒否');
       return;
     }
@@ -456,15 +467,115 @@ export class Orchestrator {
         : {}),
     });
     if (!sent) await this.notifyApprovalProcessGone(pending);
+    else this.stateManager.updateStatus(pending.sessionId, 'running');
     log.info({ approvalKey: action.approvalKey, actionId: action.actionId }, '承認OK、control_response送信');
   }
 
-  private async notifyApprovalProcessGone(pending: PendingApproval): Promise<void> {
+  private async notifyApprovalProcessGone(pending: PendingApprovalRecord): Promise<void> {
     await this.slackBot.postMessage({
       channelId: pending.channelId,
       threadTs: pending.threadTs,
       text: 'セッションのプロセスが既に終了していました。同じスレッドで再依頼すると続きから再開します。',
     });
+  }
+
+  /**
+   * プロセス消滅後（再起動・アイドル終了）に押された承認ボタンを--resumeで復旧する。
+   * 承認時は復旧セッションの最初の同名ツール要求を自動承認し、ボタンの二度押しなしで続行させる。
+   */
+  private async resumeInterruptedApproval(
+    pending: PendingApprovalRecord,
+    action: ApprovalAction,
+  ): Promise<void> {
+    const session = this.stateManager.getSession(pending.sessionId);
+    const threadKey = `${pending.channelId}:${pending.threadTs}`;
+
+    if (!session?.claudeSessionId) {
+      await this.slackBot.updateMessage({
+        channelId: pending.channelId,
+        ts: pending.approvalMessageTs,
+        text: `この承認は期限切れです: ${pending.toolName}`,
+      });
+      await this.slackBot.postMessage({
+        channelId: pending.channelId,
+        threadTs: pending.threadTs,
+        text: 'セッションを復元できませんでした。同じスレッドで再依頼してください。',
+      });
+      this.stateManager.updateStatus(pending.sessionId, 'failed');
+      return;
+    }
+
+    const approved = action.actionId !== 'reject';
+    const alwaysLabel = action.actionId === 'approve_always' ? '・今後も許可' : '';
+    await this.slackBot.updateMessage({
+      channelId: pending.channelId,
+      ts: pending.approvalMessageTs,
+      text: approved
+        ? `承認されました (by <@${action.userId}>${alwaysLabel})・セッション復旧中: ${pending.toolName}`
+        : `拒否されました (by <@${action.userId}>): ${pending.toolName}`,
+    });
+
+    // 旧セッションを閉じて、--resumeで新セッションとして続きを実行
+    this.stateManager.updateStatus(pending.sessionId, 'failed');
+    this.stateManager.deletePendingApprovalsBySession(pending.sessionId);
+
+    const prompt = approved
+      ? `（中断復旧）先ほど承認待ちだった \`${pending.toolName}\` の実行が承認されました。中断したタスクを続きから実行してください。`
+      : `（中断復旧）先ほど承認待ちだった \`${pending.toolName}\` の実行は拒否されました。この操作は行わず、代替案があれば提示してください。`;
+
+    const repoName = session.cwd.split('/').pop() || '';
+    const repoConfig = this.config.repoConfigs.get(repoName);
+    const sessionId = uuidv4();
+
+    this.stateManager.createSession({
+      sessionId,
+      channelId: pending.channelId,
+      threadTs: pending.threadTs,
+      cwd: session.cwd,
+    });
+    this.outputBuffers.set(sessionId, '');
+    this.runningThreads.add(threadKey);
+    this.runningSessionIds.set(threadKey, sessionId);
+    this.resumeSessions.set(sessionId, { cwd: session.cwd, prompt, repoConfig });
+
+    if (approved) {
+      this.autoApprovals.set(sessionId, {
+        toolName: pending.toolName,
+        always: action.actionId === 'approve_always',
+        suggestions: pending.suggestions,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
+    }
+
+    const cwdShort = session.cwd.split('/').slice(-2).join('/');
+    const { ts: progressTs } = await this.slackBot.postMessage({
+      channelId: pending.channelId,
+      threadTs: pending.threadTs,
+      text: `セッション復旧中... (${cwdShort})`,
+    });
+    this.progressMessageTs.set(sessionId, { channelId: pending.channelId, ts: progressTs });
+    this.toolHistory.set(sessionId, []);
+
+    try {
+      await this.cliManager.spawnSession({
+        sessionId,
+        prompt,
+        cwd: session.cwd,
+        resumeClaudeSessionId: session.claudeSessionId,
+        repoConfig,
+      });
+      log.info({ sessionId, approvalKey: pending.approvalKey, approved }, '承認からセッション復旧');
+    } catch (err) {
+      log.error({ err, sessionId }, '復旧セッション起動失敗');
+      this.stateManager.updateStatus(sessionId, 'failed');
+      this.autoApprovals.delete(sessionId);
+      this.finishSession(threadKey, sessionId);
+      await this.slackBot.postMessage({
+        channelId: pending.channelId,
+        threadTs: pending.threadTs,
+        text: 'セッションの復旧に失敗しました。同じスレッドで再依頼してください。',
+      });
+    }
   }
 
   /**
@@ -480,31 +591,16 @@ export class Orchestrator {
     }
 
     // 承認待ちのままプロセスが終了した場合（アイドルタイムアウト）
-    const expired = Array.from(this.pendingApprovals.entries()).filter(
-      ([, p]) => p.sessionId === sessionId,
-    );
+    // 承認レコードはDBに残し、ボタン押下時に--resumeで復旧できるようにする
+    const expired = this.stateManager.listPendingApprovalsBySession(sessionId);
     if (expired.length === 0) return;
-
-    for (const [key, p] of expired) {
-      this.pendingApprovals.delete(key);
-      try {
-        await this.slackBot.updateMessage({
-          channelId: p.channelId,
-          ts: p.approvalMessageTs,
-          text: `承認待ちのままタイムアウトしました（期限切れ）: ${p.toolName}`,
-        });
-      } catch (err) {
-        log.warn({ err, sessionId }, '承認メッセージ更新失敗');
-      }
-    }
 
     if (this.runningSessionIds.get(threadKey) === sessionId) {
       await this.slackBot.postMessage({
         channelId: session.channelId,
         threadTs: session.threadTs,
-        text: '承認待ちのままタイムアウトしたため中断しました。同じスレッドで再依頼すると続きから再開します。',
+        text: '承認待ちのままアイドルタイムアウトしました。承認ボタンを押せば復旧して続行します。',
       });
-      this.stateManager.updateStatus(sessionId, 'failed');
       this.finishSession(threadKey, sessionId);
     }
   }
@@ -546,6 +642,22 @@ export class Orchestrator {
         const p = event.permission;
         if (!p) break;
         const approvalKey = `${event.sessionId}:${p.requestId}`;
+
+        // 再起動復旧セッション: 承認済みツールの最初の要求は自動承認（二度押し不要）
+        const auto = this.autoApprovals.get(event.sessionId);
+        if (auto && auto.toolName === p.toolName && Date.now() < auto.expiresAt) {
+          this.autoApprovals.delete(event.sessionId);
+          this.cliManager.sendControlResponse(event.sessionId, p.requestId, {
+            behavior: 'allow',
+            updatedInput: p.input,
+            ...(auto.always && auto.suggestions.length > 0
+              ? { updatedPermissions: auto.suggestions }
+              : {}),
+          });
+          log.info({ approvalKey, toolName: p.toolName }, '復旧セッションの承認済みツールを自動承認');
+          break;
+        }
+
         const inputSummary = this.truncateInput(JSON.stringify(p.input, null, 2));
         const context = `ツール: \`${p.toolName}\`\n\`\`\`${inputSummary}\`\`\``;
 
@@ -557,7 +669,9 @@ export class Orchestrator {
           hasSuggestions: p.suggestions.length > 0,
         });
 
-        this.pendingApprovals.set(approvalKey, {
+        // 再起動後もボタンを有効にするためSQLiteに永続化
+        this.stateManager.createPendingApproval({
+          approvalKey,
           sessionId: event.sessionId,
           requestId: p.requestId,
           channelId: session.channelId,
@@ -567,6 +681,7 @@ export class Orchestrator {
           suggestions: p.suggestions,
           approvalMessageTs: ts,
         });
+        this.stateManager.updateStatus(event.sessionId, 'waiting_approval');
 
         // 承認待ちもアイドルタイムアウトの対象にする（放置でプロセス終了）
         this.cliManager.markIdle(event.sessionId);
@@ -600,6 +715,8 @@ export class Orchestrator {
         }
 
         this.stateManager.updateStatus(event.sessionId, 'completed');
+        this.stateManager.deletePendingApprovalsBySession(event.sessionId);
+        this.autoApprovals.delete(event.sessionId);
         this.finishSession(threadKey, event.sessionId);
 
         // プロセスは生かしたまま常駐させる（次メッセージは同一プロセスへ追送）
@@ -791,7 +908,8 @@ export class Orchestrator {
     const sessionId = this.runningSessionIds.get(threadKey);
     if (sessionId) {
       this.cliManager.terminate(sessionId);
-      this.stateManager.updateStatus(sessionId, 'failed');
+      this.stateManager.updateStatus(sessionId, 'cancelled');
+      await this.expireApprovals(sessionId, 'キャンセルにより期限切れ');
       log.info({ threadKey, sessionId }, '中断リクエスト');
     }
 
@@ -806,6 +924,25 @@ export class Orchestrator {
       threadTs: msg.threadTs,
       text: '中断しました。',
     });
+  }
+
+  /**
+   * セッションの承認待ちボタンをすべて期限切れ表示にしてDBから削除する
+   */
+  private async expireApprovals(sessionId: string, reason: string): Promise<void> {
+    const pendings = this.stateManager.listPendingApprovalsBySession(sessionId);
+    for (const p of pendings) {
+      try {
+        await this.slackBot.updateMessage({
+          channelId: p.channelId,
+          ts: p.approvalMessageTs,
+          text: `${reason}: ${p.toolName}`,
+        });
+      } catch (err) {
+        log.warn({ err, sessionId }, '承認メッセージ更新失敗');
+      }
+    }
+    this.stateManager.deletePendingApprovalsBySession(sessionId);
   }
 
   private finishSession(threadKey: string, sessionId: string): void {
@@ -868,13 +1005,52 @@ export class Orchestrator {
     // tmpディレクトリを起動時に作成（/tmp がリフレッシュされた場合に備える）
     mkdirSync('/tmp/ai-steward-files', { recursive: true });
 
-    const stale = this.stateManager.markStaleSessionsFailed();
-    if (stale > 0) {
-      log.warn({ count: stale }, '残存セッションをfailedに変更');
+    await this.slackBot.start();
+    await this.recoverAfterRestart();
+    log.info('Orchestrator 起動完了');
+  }
+
+  /**
+   * 再起動時の復旧: 実行中だったセッションは中断を通知してfailed化し、
+   * 承認待ちセッションはレコードを残してボタン押下での--resume復旧を可能にする
+   */
+  private async recoverAfterRestart(): Promise<void> {
+    for (const session of this.stateManager.listSessionsByStatus('running')) {
+      this.stateManager.updateStatus(session.sessionId, 'failed');
+      try {
+        await this.slackBot.postMessage({
+          channelId: session.channelId,
+          threadTs: session.threadTs,
+          text: 'ai-stewardの再起動により実行中のタスクが中断されました。同じスレッドで再依頼すると続きから再開します。',
+        });
+      } catch (err) {
+        log.warn({ err, sessionId: session.sessionId }, '中断通知の投稿失敗');
+      }
+      log.warn({ sessionId: session.sessionId }, '再起動により実行中セッションをfailed化');
     }
 
-    await this.slackBot.start();
-    log.info('Orchestrator 起動完了');
+    for (const session of this.stateManager.listSessionsByStatus('waiting_approval')) {
+      const pendings = this.stateManager.listPendingApprovalsBySession(session.sessionId);
+      if (pendings.length === 0) {
+        // 承認レコードなし（旧バージョンからの残骸など）→ 復旧できないのでfailed化
+        this.stateManager.updateStatus(session.sessionId, 'failed');
+        try {
+          await this.slackBot.postMessage({
+            channelId: session.channelId,
+            threadTs: session.threadTs,
+            text: '再起動により承認待ちのタスクが失われました。同じスレッドで再依頼してください。',
+          });
+        } catch (err) {
+          log.warn({ err, sessionId: session.sessionId }, '中断通知の投稿失敗');
+        }
+        continue;
+      }
+      // 承認レコードあり → ボタンは押下可能なまま（押下時に--resumeで復旧）
+      log.info(
+        { sessionId: session.sessionId, pendingCount: pendings.length },
+        '承認待ちセッションを復旧待機（ボタン押下で--resume）',
+      );
+    }
   }
 
   async stop(): Promise<void> {
