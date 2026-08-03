@@ -19,6 +19,8 @@ export interface AppConfig {
     path: string;
     homeDir: string;
     defaultCwd: string;
+    // 既定の--permission-mode（RepoConfigのpermissionModeで上書き可）
+    defaultPermissionMode: string;
   };
   anthropicApiKey: string | null;
   dbPath: string;
@@ -81,6 +83,7 @@ export function loadConfig(): AppConfig {
       path: process.env.CLAUDE_PATH || 'claude',
       homeDir: process.env.CLAUDE_HOME || process.env.HOME || '/home/kaz',
       defaultCwd: process.env.CLAUDE_CWD || '/home/kaz/git',
+      defaultPermissionMode: process.env.DEFAULT_PERMISSION_MODE || 'default',
     },
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
     dbPath: process.env.DB_PATH || './data/steward.db',

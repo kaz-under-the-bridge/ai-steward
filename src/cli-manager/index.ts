@@ -15,6 +15,8 @@ export interface CliManagerConfig {
   defaultCwd: string;
   homeDir: string;
   idleTimeoutMs?: number;
+  // 既定の--permission-mode（未指定なら 'default'）
+  defaultPermissionMode?: string;
 }
 
 // 承認応答（control_response の response.response 部分）
@@ -72,7 +74,7 @@ export class CliManager extends EventEmitter {
     }
 
     // permission-mode: デフォルトは default（読み取り自動 + 書込等は承認）、RepoConfigで上書き可能
-    const permissionMode = rc?.permissionMode || 'default';
+    const permissionMode = rc?.permissionMode || this.config.defaultPermissionMode || 'default';
     args.push('--permission-mode', permissionMode);
 
     // --add-dir: /tmp/ai-steward-files（常に）+ RepoConfigの追加分
