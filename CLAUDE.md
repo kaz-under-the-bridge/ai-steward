@@ -22,6 +22,7 @@ src/
 ├── types.ts              共通型定義（IncomingMessage, StreamEvent, SlackFile, ApprovalAction）
 ├── repo-resolver.ts      メッセージ中のリポ名→cwdパス解決（findでgit root探索）
 ├── redaction.ts          Slack出力の秘密情報マスク（トークン・key=value・PEM）
+├── format-utils.ts       !status/!usage表示用の整形（経過時間・トークン数）
 ├── slack-bot/
 │   └── index.ts          @slack/bolt Socket Mode、メッセージ・ファイル添付受信、Block Kitアクション
 ├── cli-manager/
@@ -80,6 +81,14 @@ stream-json入出力はNDJSON形式（1行1JSONオブジェクト）。主要イ
 - `{"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}` → テキスト応答
 - `{"type":"control_request","request_id":"...","request":{"subtype":"can_use_tool",...}}` → 権限要求（Slack承認ボタン → control_responseで応答）
 - `{"type":"result","result":"...","is_error":false}` → 実行完了（プロセスは常駐継続）
+
+### Slack操作コマンド
+
+`!` prefixの予約コマンド（通常依頼と衝突しない）:
+
+- `!status` — 実行中セッション一覧（リポ・状態・経過時間）と順番待ち件数
+- `!stop` — そのスレッドの実行中タスクを中断（cancelled遷移 + 承認ボタン期限切れ）
+- `!usage` — スレッド直近タスクと起動後累計のトークン・実行時間・モデル名
 
 ### 日本語
 
