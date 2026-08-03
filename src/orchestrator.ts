@@ -64,6 +64,7 @@ export class Orchestrator {
       claudePath: config.claude.path,
       defaultCwd: config.claude.defaultCwd,
       homeDir: config.claude.homeDir,
+      defaultPermissionMode: config.claude.defaultPermissionMode,
     });
     this.stateManager = new StateManager(config.dbPath);
     this.formatter = config.anthropicApiKey

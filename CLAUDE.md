@@ -98,6 +98,7 @@ stream-json入出力はNDJSON形式（1行1JSONオブジェクト）。主要イ
 | ANTHROPIC_API_KEY | No | Anthropic API Key (Formatter用、MVP3以降) |
 | CLAUDE_HOME | No | Claude認証情報のHOMEパス (default: $HOME) |
 | CLAUDE_CWD | No | デフォルト作業ディレクトリ (default: /home/kaz/git) |
+| DEFAULT_PERMISSION_MODE | No | 既定の--permission-mode (default: default)。bypassPermissions / acceptEdits 等。repos.jsonのpermissionModeでリポ毎に上書き可 |
 | DB_PATH | No | SQLiteファイルパス (default: ./data/steward.db) |
 | LOG_LEVEL | No | ログレベル (default: info) |
 

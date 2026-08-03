@@ -47,7 +47,8 @@ interface CliManagerConfig {
   claudePath: string;      // default: 'claude'
   defaultCwd: string;
   homeDir: string;         // Claude認証情報のHOME
-  idleTimeoutMs?: number;  // default: 600000 (10分)
+  idleTimeoutMs?: number;          // default: 600000 (10分)
+  defaultPermissionMode?: string;  // default: 'default'（DEFAULT_PERMISSION_MODE env、RepoConfigで上書き可）
 }
 
 type PermissionResponse =
