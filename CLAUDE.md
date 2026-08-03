@@ -23,6 +23,7 @@ src/
 ├── repo-resolver.ts      メッセージ中のリポ名→cwdパス解決（findでgit root探索）
 ├── redaction.ts          Slack出力の秘密情報マスク（トークン・key=value・PEM）
 ├── format-utils.ts       !status/!usage表示用の整形（経過時間・トークン数）
+├── git-info.ts           タスク完了時のPRリンク生成（git/ghの確定情報から取得）
 ├── slack-bot/
 │   └── index.ts          @slack/bolt Socket Mode、メッセージ・ファイル添付受信、Block Kitアクション
 ├── cli-manager/
