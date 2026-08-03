@@ -17,6 +17,9 @@ export interface CliManagerConfig {
   idleTimeoutMs?: number;
   // 既定の--permission-mode（未指定なら 'default'）
   defaultPermissionMode?: string;
+  // 既定の--model / --effort（RepoConfigのmodel/effortで上書き可）
+  defaultModel?: string;
+  defaultEffort?: string;
 }
 
 // 承認応答（control_response の response.response 部分）
@@ -61,9 +64,9 @@ export class CliManager extends EventEmitter {
       '--verbose',
       // settings.jsonのmodel設定に依存させず、bot用のモデル/effortを固定する
       '--model',
-      'claude-fable-5',
+      rc?.model || this.config.defaultModel || 'claude-fable-5',
       '--effort',
-      'low',
+      rc?.effort || this.config.defaultEffort || 'low',
       // 権限要求をcontrol_request(can_use_tool)としてstdioで受ける（help非掲載フラグ、CLI v2.1.220で検証済み）
       '--permission-prompt-tool',
       'stdio',

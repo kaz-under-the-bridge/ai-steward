@@ -111,6 +111,10 @@ stream-json入出力はNDJSON形式（1行1JSONオブジェクト）。主要イ
 | CLAUDE_HOME | No | Claude認証情報のHOMEパス (default: $HOME) |
 | CLAUDE_CWD | No | デフォルト作業ディレクトリ (default: /home/kaz/git) |
 | DEFAULT_PERMISSION_MODE | No | 既定の--permission-mode (default: default)。bypassPermissions / acceptEdits 等。repos.jsonのpermissionModeでリポ毎に上書き可 |
+| MODEL_MAIN | No | Claude Code CLIの--model (default: claude-fable-5)。repos.jsonのmodelでリポ毎に上書き可 |
+| MODEL_MAIN_EFFORT | No | Claude Code CLIの--effort (default: low)。low / medium / high / xhigh / max。repos.jsonのeffortでリポ毎に上書き可 |
+| MODEL_LIGHT | No | Router・Formatter用の軽量モデル (default: claude-haiku-4-5-20251001) |
+| MODEL_MAINTENANCE | No | メンテナンスモード用モデル (default: claude-sonnet-4-6) |
 | MAX_CONCURRENT_SESSIONS | No | 常駐CLIプロセス数の全体上限 (default: 3)。超過分は順番待ちキューへ |
 | SESSION_TIMEOUT_MINUTES | No | 1タスクのwall-clockタイムアウト分 (default: 60)。超過で打ち切り通知 |
 | DB_PATH | No | SQLiteファイルパス (default: ./data/steward.db) |

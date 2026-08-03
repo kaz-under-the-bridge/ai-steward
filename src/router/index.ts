@@ -45,33 +45,54 @@ export class Router {
   }
 
   async route(message: string): Promise<RouteResult> {
-    try {
-      const response = await this.client.messages.create({
-        model: this.model,
-        max_tokens: 100,
-        system: SYSTEM_PROMPT,
-        messages: [
-          {
-            role: 'user',
-            content: `リポジトリ一覧: ${this.repoNames.join(', ')}\n\nメッセージ: ${message}`,
-          },
-        ],
-      });
+    // スキーマ検証NG・API失敗は1回だけリトライし、それでもダメならgeneralにフォールバック
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await this.client.messages.create({
+          model: this.model,
+          max_tokens: 100,
+          system: SYSTEM_PROMPT,
+          messages: [
+            {
+              role: 'user',
+              content: `リポジトリ一覧: ${this.repoNames.join(', ')}\n\nメッセージ: ${message}`,
+            },
+          ],
+        });
 
-      let text = response.content
-        .filter((c): c is Anthropic.TextBlock => c.type === 'text')
-        .map((c) => c.text)
-        .join('');
+        let text = response.content
+          .filter((c): c is Anthropic.TextBlock => c.type === 'text')
+          .map((c) => c.text)
+          .join('');
 
-      // Haikuが```jsonフェンスで囲む場合があるので除去
-      text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        // モデルが```jsonフェンスで囲む場合があるので除去
+        text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
-      const parsed = JSON.parse(text) as RouteResult;
-      log.info({ intent: parsed.intent, repoName: parsed.repoName, message: message.slice(0, 80) }, 'ルーティング結果');
-      return parsed;
-    } catch (err) {
-      log.warn({ err, message: message.slice(0, 80) }, 'ルーティング失敗、generalにフォールバック');
-      return { intent: 'general', repoName: null };
+        const parsed = validateRouteResult(JSON.parse(text));
+        log.info({ intent: parsed.intent, repoName: parsed.repoName, message: message.slice(0, 80) }, 'ルーティング結果');
+        return parsed;
+      } catch (err) {
+        log.warn({ err, attempt, message: message.slice(0, 80) }, 'ルーティング失敗');
+      }
     }
+    log.warn({ message: message.slice(0, 80) }, 'ルーティングをリトライしても失敗、generalにフォールバック');
+    return { intent: 'general', repoName: null };
   }
+}
+
+/**
+ * モデル出力をRouteResultスキーマで検証する（不正はthrow → リトライ対象）
+ */
+export function validateRouteResult(value: unknown): RouteResult {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error(`ルーター出力がオブジェクトではありません: ${JSON.stringify(value)}`);
+  }
+  const { intent, repoName } = value as Record<string, unknown>;
+  if (intent !== 'task' && intent !== 'general') {
+    throw new Error(`ルーター出力のintentが不正です: ${JSON.stringify(intent)}`);
+  }
+  if (repoName !== null && typeof repoName !== 'string') {
+    throw new Error(`ルーター出力のrepoNameが不正です: ${JSON.stringify(repoName)}`);
+  }
+  return { intent, repoName };
 }

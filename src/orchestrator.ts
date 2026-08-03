@@ -93,16 +93,18 @@ export class Orchestrator {
       defaultCwd: config.claude.defaultCwd,
       homeDir: config.claude.homeDir,
       defaultPermissionMode: config.claude.defaultPermissionMode,
+      defaultModel: config.models.main.model,
+      defaultEffort: config.models.main.effort,
     });
     this.stateManager = new StateManager(config.dbPath);
     this.formatter = config.anthropicApiKey
-      ? new Formatter({ ...DEFAULT_FORMATTER_CONFIG, anthropicApiKey: config.anthropicApiKey })
+      ? new Formatter({ ...DEFAULT_FORMATTER_CONFIG, anthropicApiKey: config.anthropicApiKey, model: config.models.light })
       : null;
     this.router = config.anthropicApiKey
-      ? new Router(config.anthropicApiKey, 'claude-haiku-4-5-20251001', getRepoNames(config.claude.defaultCwd))
+      ? new Router(config.anthropicApiKey, config.models.light, getRepoNames(config.claude.defaultCwd))
       : null;
     this.maintenance = config.anthropicApiKey
-      ? new Maintenance(config.anthropicApiKey)
+      ? new Maintenance(config.anthropicApiKey, config.models.maintenance)
       : null;
     this.slackBot = new SlackBot(
       {
