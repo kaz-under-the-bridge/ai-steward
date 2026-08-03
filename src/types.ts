@@ -53,6 +53,27 @@ export interface ApprovalAction {
   approvalKey: string;
 }
 
+// AskUserQuestionの選択肢ボタンアクション
+export interface QuestionAction {
+  channelId: string;
+  threadTs: string;
+  userId: string;
+  // "sessionId:requestId" 形式
+  approvalKey: string;
+  questionIndex: number;
+  optionIndex: number;
+}
+
+// AskUserQuestionのinput構造（CLIのcontrol_requestから受信）
+export interface AskUserQuestionInput {
+  questions: Array<{
+    question: string;
+    header?: string;
+    options: Array<{ label: string; description?: string }>;
+    multiSelect?: boolean;
+  }>;
+}
+
 // CLIセッション
 export interface CliSession {
   sessionId: string;

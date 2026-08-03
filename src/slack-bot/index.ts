@@ -1,7 +1,7 @@
 import { App, LogLevel } from '@slack/bolt';
 import type { Button } from '@slack/types';
 import { createChildLogger } from '../logger.js';
-import type { IncomingMessage, ApprovalAction, SlackFile } from '../types.js';
+import type { IncomingMessage, ApprovalAction, QuestionAction, SlackFile } from '../types.js';
 
 const log = createChildLogger('slack-bot');
 
@@ -17,6 +17,7 @@ export interface SlackBotConfig {
 export interface SlackEventHandlers {
   onMessage(event: IncomingMessage): Promise<void>;
   onApprovalAction(event: ApprovalAction): Promise<void>;
+  onQuestionAction(event: QuestionAction): Promise<void>;
 }
 
 export class SlackBot {
@@ -156,6 +157,41 @@ export class SlackBot {
         });
       });
     }
+
+    // AskUserQuestionの選択肢ボタン（value: "approvalKey|questionIndex|optionIndex"）
+    this.app.action(/^question_option_\d+$/, async ({ body, ack }) => {
+      await ack();
+      if (body.type !== 'block_actions') return;
+      const action = body.actions[0];
+      const value = ('value' in action ? action.value : '') || '';
+      const parts = value.split('|');
+      // approvalKeyは "sessionId:requestId" 形式でコロンを含むため、後ろ2つをindexとして取る
+      const optionIndex = Number(parts.pop());
+      const questionIndex = Number(parts.pop());
+      const approvalKey = parts.join('|');
+      const channelId = body.channel?.id || '';
+      const threadTs = body.message?.thread_ts || body.message?.ts || '';
+      const userId = body.user.id;
+
+      if (!this.config.allowedUserIds.includes(userId)) {
+        log.warn({ approvalKey, userId }, '許可外ユーザーの質問回答を無視');
+        return;
+      }
+      if (!approvalKey || Number.isNaN(questionIndex) || Number.isNaN(optionIndex)) {
+        log.warn({ value }, '質問回答のvalueが不正');
+        return;
+      }
+
+      log.info({ approvalKey, questionIndex, optionIndex, userId }, '質問回答押下');
+      await handlers.onQuestionAction({
+        channelId,
+        threadTs,
+        userId,
+        approvalKey,
+        questionIndex,
+        optionIndex,
+      });
+    });
   }
 
   async start(): Promise<void> {
@@ -234,6 +270,49 @@ export class SlackBot {
           text: {
             type: 'mrkdwn',
             text: `*権限の承認が必要です*\n${params.context}`,
+          },
+        },
+        {
+          type: 'actions',
+          elements: buttons,
+        },
+      ],
+    });
+    return { ts: result.ts || '' };
+  }
+
+  async postQuestion(params: {
+    channelId: string;
+    threadTs: string;
+    header?: string;
+    question: string;
+    options: Array<{ label: string; description?: string }>;
+    approvalKey: string;
+    questionIndex: number;
+  }): Promise<{ ts: string }> {
+    // ボタンは最大5個（Slack actionsブロックの上限）
+    const buttons: Button[] = params.options.slice(0, 5).map((o, i) => ({
+      type: 'button',
+      text: { type: 'plain_text', text: o.label.slice(0, 75) },
+      action_id: `question_option_${i}`,
+      value: `${params.approvalKey}|${params.questionIndex}|${i}`,
+    }));
+
+    const headerLabel = params.header ? `[${params.header}] ` : '';
+    const optionLines = params.options
+      .map((o, i) => `${i + 1}. *${o.label}*${o.description ? ` — ${o.description}` : ''}`)
+      .join('\n');
+
+    const result = await this.app.client.chat.postMessage({
+      channel: params.channelId,
+      thread_ts: params.threadTs,
+      text: `質問: ${params.question}`,
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*❓ ${headerLabel}${params.question}*\n${optionLines}`,
           },
         },
         {
