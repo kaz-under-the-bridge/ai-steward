@@ -14,7 +14,14 @@ import { resolveRepoByName, resolveRepoFromPrefix, getRepoNames } from './repo-r
 import { redactSecrets } from './redaction.js';
 import { formatElapsed, formatTokenCount, elapsedSinceSqliteUtc } from './format-utils.js';
 import type { AppConfig, RepoConfig } from './config.js';
-import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './types.js';
+import type {
+  IncomingMessage,
+  StreamEvent,
+  ApprovalAction,
+  QuestionAction,
+  AskUserQuestionInput,
+  SlackFile,
+} from './types.js';
 
 const log = createChildLogger('orchestrator');
 
@@ -56,6 +63,9 @@ export class Orchestrator {
   private globalQueue: IncomingMessage[] = [];
   // 直近タスクのusage（key: threadKey）と起動後の累計
   private lastUsageByThread: Map<string, TaskUsage> = new Map();
+  // AskUserQuestionの回答収集（key: approvalKey）。questionMessageTsは各質問メッセージの更新用
+  private questionAnswers: Map<string, { answers: Record<string, string>; questionMessageTs: string[] }> =
+    new Map();
   private usageTotals = { tasks: 0, inputTokens: 0, outputTokens: 0, durationMs: 0 };
   // wall-clockタイムアウトタイマー（key: sessionId）
   private wallClockTimers: Map<string, NodeJS.Timeout> = new Map();
@@ -103,6 +113,7 @@ export class Orchestrator {
       {
         onMessage: this.handleMessage.bind(this),
         onApprovalAction: this.handleApprovalAction.bind(this),
+        onQuestionAction: this.handleQuestionAction.bind(this),
       },
     );
 
@@ -636,6 +647,141 @@ export class Orchestrator {
     );
   }
 
+  /**
+   * AskUserQuestionの各質問をSlackの選択肢ボタンとして投稿し、承認レコードに永続化する
+   */
+  private async postQuestionsToSlack(
+    sessionId: string,
+    session: { channelId: string; threadTs: string },
+    approvalKey: string,
+    requestId: string,
+    input: Record<string, unknown>,
+  ): Promise<void> {
+    const questions = (input as unknown as AskUserQuestionInput).questions || [];
+    if (questions.length === 0) {
+      // 質問なし → そのまま許可（実質no-op）
+      this.cliManager.sendControlResponse(sessionId, requestId, {
+        behavior: 'allow',
+        updatedInput: input,
+      });
+      return;
+    }
+
+    const messageTs: string[] = [];
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      const { ts } = await this.slackBot.postQuestion({
+        channelId: session.channelId,
+        threadTs: session.threadTs,
+        header: q.header,
+        question: q.question,
+        options: q.options,
+        approvalKey,
+        questionIndex: i,
+      });
+      messageTs.push(ts);
+    }
+
+    this.questionAnswers.set(approvalKey, { answers: {}, questionMessageTs: messageTs });
+    this.stateManager.createPendingApproval({
+      approvalKey,
+      sessionId,
+      requestId,
+      channelId: session.channelId,
+      threadTs: session.threadTs,
+      toolName: 'AskUserQuestion',
+      input,
+      suggestions: [],
+      approvalMessageTs: messageTs[0],
+    });
+    this.stateManager.updateStatus(sessionId, 'waiting_approval');
+    this.cliManager.markIdle(sessionId);
+    log.info(
+      { ...this.ctx(sessionId), approvalKey, questionCount: questions.length },
+      '質問ボタンを表示',
+    );
+  }
+
+  /**
+   * AskUserQuestionの選択肢ボタン押下。全質問に回答が揃ったらanswersを注入して続行する
+   */
+  private async handleQuestionAction(action: QuestionAction): Promise<void> {
+    const pending = this.stateManager.getPendingApproval(action.approvalKey);
+    if (!pending) {
+      await this.slackBot.postMessage({
+        channelId: action.channelId,
+        threadTs: action.threadTs,
+        text: 'この質問は期限切れです。同じスレッドで再依頼してください。',
+      });
+      return;
+    }
+
+    // プロセス消滅（アイドルタイムアウト・再起動）後の回答は期限切れ扱い
+    // （AskUserQuestionはツール実行前の状態を復元できないため、再依頼を案内する）
+    if (!this.cliManager.hasSession(pending.sessionId)) {
+      await this.expireApprovals(pending.sessionId, '質問が期限切れ');
+      this.stateManager.updateStatus(pending.sessionId, 'failed');
+      await this.slackBot.postMessage({
+        channelId: pending.channelId,
+        threadTs: pending.threadTs,
+        text: '質問が期限切れになりました（プロセス終了）。同じスレッドで再依頼してください。',
+      });
+      return;
+    }
+
+    const questions = (pending.input as unknown as AskUserQuestionInput).questions || [];
+    const q = questions[action.questionIndex];
+    const option = q?.options?.[action.optionIndex];
+    if (!q || !option) {
+      log.warn({ approvalKey: action.approvalKey, action }, '質問回答のindexが不正');
+      return;
+    }
+
+    const state = this.questionAnswers.get(action.approvalKey) || {
+      answers: {},
+      questionMessageTs: [],
+    };
+    state.answers[q.question] = option.label;
+    this.questionAnswers.set(action.approvalKey, state);
+
+    // 回答済み表示に更新
+    const msgTs = state.questionMessageTs[action.questionIndex];
+    if (msgTs) {
+      try {
+        await this.slackBot.updateMessage({
+          channelId: pending.channelId,
+          ts: msgTs,
+          text: `❓ ${q.question} → *${option.label}* (by <@${action.userId}>)`,
+        });
+      } catch (err) {
+        log.warn({ err, approvalKey: action.approvalKey }, '質問メッセージ更新失敗');
+      }
+    }
+
+    // 全質問に回答が揃うまで待つ
+    if (Object.keys(state.answers).length < questions.length) {
+      log.info(
+        { approvalKey: action.approvalKey, answered: Object.keys(state.answers).length, total: questions.length },
+        '質問回答を受付（残りあり）',
+      );
+      return;
+    }
+
+    // answersを注入して許可 → ツールが回答を本体に返す（PoCで検証済みの方式）
+    this.stateManager.deletePendingApproval(action.approvalKey);
+    this.questionAnswers.delete(action.approvalKey);
+    const sent = this.cliManager.sendControlResponse(pending.sessionId, pending.requestId, {
+      behavior: 'allow',
+      updatedInput: { ...pending.input, answers: state.answers },
+    });
+    if (!sent) {
+      await this.notifyApprovalProcessGone(pending);
+      return;
+    }
+    this.stateManager.updateStatus(pending.sessionId, 'running');
+    log.info({ ...this.ctx(pending.sessionId), approvalKey: action.approvalKey }, '全質問回答、answersを注入');
+  }
+
   private async notifyApprovalProcessGone(pending: PendingApprovalRecord): Promise<void> {
     await this.slackBot.postMessage({
       channelId: pending.channelId,
@@ -808,6 +954,12 @@ export class Orchestrator {
         const p = event.permission;
         if (!p) break;
         const approvalKey = `${event.sessionId}:${p.requestId}`;
+
+        // AskUserQuestionはSlackの選択肢ボタンで中継する（承認ボタンではなく回答UI）
+        if (p.toolName === 'AskUserQuestion') {
+          await this.postQuestionsToSlack(event.sessionId, session, approvalKey, p.requestId, p.input);
+          break;
+        }
 
         // 再起動復旧セッション: 承認済みツールの最初の要求は自動承認（二度押し不要）
         const auto = this.autoApprovals.get(event.sessionId);

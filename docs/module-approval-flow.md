@@ -41,6 +41,19 @@ Orchestrator ──sendControlResponse(allow/deny)──▶ CLI Manager ──st
 1タスク中に承認が複数回発生しても、その都度ボタンが出る
 （key: `sessionId:requestId` で個別管理）。
 
+## AskUserQuestionのSlack中継
+
+`tool_name: AskUserQuestion` の `can_use_tool` は承認ボタンではなく**選択肢ボタン**として
+中継する（質問ごとに1メッセージ、選択肢は最大5個のボタン）:
+
+- 全質問に回答が揃った時点で `behavior: allow` + `updatedInput: { ...input, answers }` を送る
+  （answersは「質問文 → 選択ラベル」のmap。CLI v2.1.220のPoCで回答が本体に注入されることを確認済み）
+- 回答済みの質問メッセージは「質問 → 選択ラベル (by @user)」に更新
+- multiSelectは単一選択として扱う（MVP制限）。自由入力（Other相当）は未対応
+- 未回答のままプロセスが消滅（アイドルタイムアウト・再起動）した場合は**期限切れ**とし、
+  ボタン押下時に「再依頼してください」と案内する（ツール実行前の状態は復元できないため、
+  承認フローの `--resume` 復旧は行わない）
+
 ## タイムアウトとプロセス消滅後の復旧
 
 承認待ちはアイドルタイムアウト（10分）の対象。放置するとプロセスは終了するが、
