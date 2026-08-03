@@ -41,6 +41,10 @@ export class Orchestrator {
   private liveThreadProcesses: Map<string, string> = new Map();
   // メッセージキュー（key: threadKey）
   private messageQueues: Map<string, IncomingMessage[]> = new Map();
+  // 全体同時実行上限の順番待ちキュー
+  private globalQueue: IncomingMessage[] = [];
+  // wall-clockタイムアウトタイマー（key: sessionId）
+  private wallClockTimers: Map<string, NodeJS.Timeout> = new Map();
   // 再起動復旧後のセッションで、最初に一致したツール要求を自動承認する（key: sessionId）
   private autoApprovals: Map<string, AutoApproval> = new Map();
   // セッション毎のダウンロードファイル（完了後に削除用）
@@ -214,6 +218,23 @@ export class Orchestrator {
       this.liveThreadProcesses.delete(threadKey);
     }
 
+    // 全体同時実行上限: 実行中タスク数が上限なら順番待ちキューへ
+    const maxConcurrent = this.config.claude.maxConcurrentSessions;
+    if (this.runningSessionIds.size >= maxConcurrent) {
+      this.globalQueue.push(msg);
+      log.info({ threadKey, queueSize: this.globalQueue.length }, '同時実行上限のため全体キューに追加');
+      await this.slackBot.postMessage({
+        channelId: msg.channelId,
+        threadTs: msg.threadTs,
+        text: `同時実行上限（${maxConcurrent}件）に達しています。順番待ちに追加しました (${this.globalQueue.length}件待ち)`,
+      });
+      return;
+    }
+    // プロセス数が上限に達している場合、アイドル常駐プロセスを1つ終了して枠を空ける
+    if (this.cliManager.getActiveSessions().length >= maxConcurrent) {
+      this.evictIdleResident();
+    }
+
     const existingSession = this.stateManager.getSessionByThread(msg.channelId, msg.threadTs);
 
     // 承認待ちのまま残った旧セッションは、新しい依頼で置き換える（ボタンは期限切れに）
@@ -329,6 +350,7 @@ export class Orchestrator {
         resumeClaudeSessionId,
         repoConfig,
       });
+      this.startWallClockTimer(sessionId, threadKey);
     } catch (err) {
       log.error({ err, sessionId }, 'セッション起動失敗');
       this.stateManager.updateStatus(sessionId, 'failed');
@@ -336,6 +358,20 @@ export class Orchestrator {
       this.outputBuffers.delete(sessionId);
       this.cleanupSessionFiles(sessionId);
       this.resumeSessions.delete(sessionId);
+    }
+  }
+
+  /**
+   * アイドル状態の常駐プロセスを1つ終了してプロセス枠を空ける
+   */
+  private evictIdleResident(): void {
+    for (const [threadKey, sessionId] of this.liveThreadProcesses) {
+      if (!this.runningThreads.has(threadKey)) {
+        this.cliManager.terminate(sessionId);
+        this.liveThreadProcesses.delete(threadKey);
+        log.info({ threadKey, sessionId }, 'プロセス枠確保のためアイドル常駐プロセスを終了');
+        return;
+      }
     }
   }
 
@@ -375,6 +411,7 @@ export class Orchestrator {
     });
     this.progressMessageTs.set(sessionId, { channelId: msg.channelId, ts: progressTs });
     this.toolHistory.set(sessionId, []);
+    this.startWallClockTimer(sessionId, threadKey);
     log.info({ sessionId, threadKey }, '常駐プロセスで対話継続');
     return true;
   }
@@ -564,6 +601,7 @@ export class Orchestrator {
         resumeClaudeSessionId: session.claudeSessionId,
         repoConfig,
       });
+      this.startWallClockTimer(sessionId, threadKey);
       log.info({ sessionId, approvalKey: pending.approvalKey, approved }, '承認からセッション復旧');
     } catch (err) {
       log.error({ err, sessionId }, '復旧セッション起動失敗');
@@ -785,6 +823,7 @@ export class Orchestrator {
               cwd: resumeInfo.cwd,
               repoConfig: resumeInfo.repoConfig,
             });
+            this.startWallClockTimer(retrySessionId, threadKey);
           } catch (err) {
             log.error({ err, sessionId: retrySessionId }, 'リトライ起動失敗');
             this.stateManager.updateStatus(retrySessionId, 'failed');
@@ -945,6 +984,49 @@ export class Orchestrator {
     this.stateManager.deletePendingApprovalsBySession(sessionId);
   }
 
+  /**
+   * wall-clockタイムアウト: タスク開始からの総経過時間で打ち切る（アイドルタイムアウトとは独立）
+   */
+  private startWallClockTimer(sessionId: string, threadKey: string): void {
+    this.clearWallClockTimer(sessionId);
+    const timeoutMinutes = this.config.claude.sessionTimeoutMinutes;
+    const timer = setTimeout(() => {
+      this.wallClockTimers.delete(sessionId);
+      // 既に完了・置き換え済みなら何もしない
+      if (this.runningSessionIds.get(threadKey) !== sessionId) return;
+      this.handleWallClockTimeout(sessionId, threadKey, timeoutMinutes).catch((err) => {
+        log.error({ err, sessionId }, 'wall-clockタイムアウト処理でエラー');
+      });
+    }, timeoutMinutes * 60 * 1000);
+    this.wallClockTimers.set(sessionId, timer);
+  }
+
+  private clearWallClockTimer(sessionId: string): void {
+    const timer = this.wallClockTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.wallClockTimers.delete(sessionId);
+  }
+
+  private async handleWallClockTimeout(
+    sessionId: string,
+    threadKey: string,
+    timeoutMinutes: number,
+  ): Promise<void> {
+    const session = this.stateManager.getSession(sessionId);
+    log.warn({ sessionId, threadKey, timeoutMinutes }, 'wall-clockタイムアウト、タスク打ち切り');
+    this.cliManager.terminate(sessionId);
+    this.stateManager.updateStatus(sessionId, 'failed');
+    await this.expireApprovals(sessionId, 'タイムアウトにより期限切れ');
+    if (session) {
+      await this.slackBot.postMessage({
+        channelId: session.channelId,
+        threadTs: session.threadTs,
+        text: `実行時間の上限（${timeoutMinutes}分）に達したため打ち切りました。同じスレッドで再依頼すると続きから再開します。`,
+      });
+    }
+    this.finishSession(threadKey, sessionId);
+  }
+
   private finishSession(threadKey: string, sessionId: string): void {
     this.runningThreads.delete(threadKey);
     this.runningSessionIds.delete(threadKey);
@@ -952,8 +1034,9 @@ export class Orchestrator {
     this.resumeSessions.delete(sessionId);
     this.cleanupSessionFiles(sessionId);
     this.cleanupProgress(sessionId);
+    this.clearWallClockTimer(sessionId);
 
-    // キューに待ちメッセージがあれば次を実行
+    // スレッド内キューに待ちメッセージがあれば次を実行
     const queue = this.messageQueues.get(threadKey);
     if (queue && queue.length > 0) {
       const next = queue.shift()!;
@@ -964,6 +1047,16 @@ export class Orchestrator {
       // 非同期で次のメッセージを処理（awaitしない）
       this.handleMessage(next).catch((err) => {
         log.error({ err, threadKey }, 'キューメッセージ処理失敗');
+      });
+      return;
+    }
+
+    // 全体キューに順番待ちがあれば次を実行（上限内かはhandleMessageで再判定される）
+    if (this.globalQueue.length > 0 && this.runningSessionIds.size < this.config.claude.maxConcurrentSessions) {
+      const next = this.globalQueue.shift()!;
+      log.info({ remaining: this.globalQueue.length }, '全体キューから次のメッセージを実行');
+      this.handleMessage(next).catch((err) => {
+        log.error({ err }, '全体キューメッセージ処理失敗');
       });
     }
   }

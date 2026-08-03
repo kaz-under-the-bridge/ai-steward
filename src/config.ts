@@ -22,6 +22,10 @@ export interface AppConfig {
     defaultCwd: string;
     // 既定の--permission-mode（RepoConfigのpermissionModeで上書き可）
     defaultPermissionMode: string;
+    // 常駐CLIプロセス数の全体上限（超過分はキュー待ち）
+    maxConcurrentSessions: number;
+    // 1タスクのwall-clockタイムアウト（分）
+    sessionTimeoutMinutes: number;
   };
   anthropicApiKey: string | null;
   dbPath: string;
@@ -65,6 +69,19 @@ function loadRepoConfigs(): Map<string, RepoConfig> {
   return map;
 }
 
+/**
+ * 正の整数のenvを読む（未設定はデフォルト、不正値はエラー）
+ */
+function parsePositiveInt(key: string, defaultValue: number): number {
+  const raw = process.env[key];
+  if (!raw) return defaultValue;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`環境変数 ${key} は正の整数で指定してください: ${raw}`);
+  }
+  return value;
+}
+
 export function loadConfig(): AppConfig {
   const required = (key: string): string => {
     const value = process.env[key];
@@ -86,6 +103,8 @@ export function loadConfig(): AppConfig {
       homeDir: process.env.CLAUDE_HOME || process.env.HOME || '/home/kaz',
       defaultCwd: process.env.CLAUDE_CWD || '/home/kaz/git',
       defaultPermissionMode: process.env.DEFAULT_PERMISSION_MODE || 'default',
+      maxConcurrentSessions: parsePositiveInt('MAX_CONCURRENT_SESSIONS', 3),
+      sessionTimeoutMinutes: parsePositiveInt('SESSION_TIMEOUT_MINUTES', 60),
     },
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
     dbPath: process.env.DB_PATH || './data/steward.db',
