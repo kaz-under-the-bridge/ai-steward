@@ -21,6 +21,7 @@ src/
 ├── logger.ts             pino ロガー
 ├── types.ts              共通型定義（IncomingMessage, StreamEvent, SlackFile, ApprovalAction）
 ├── repo-resolver.ts      メッセージ中のリポ名→cwdパス解決（findでgit root探索）
+├── redaction.ts          Slack出力の秘密情報マスク（トークン・key=value・PEM）
 ├── slack-bot/
 │   └── index.ts          @slack/bolt Socket Mode、メッセージ・ファイル添付受信、Block Kitアクション
 ├── cli-manager/
