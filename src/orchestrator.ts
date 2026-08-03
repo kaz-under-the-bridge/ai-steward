@@ -11,6 +11,7 @@ import { Formatter, DEFAULT_FORMATTER_CONFIG } from './formatter/index.js';
 import { Router } from './router/index.js';
 import { Maintenance } from './maintenance/index.js';
 import { resolveRepoByName, resolveRepoFromPrefix, getRepoNames } from './repo-resolver.js';
+import { redactSecrets } from './redaction.js';
 import type { AppConfig, RepoConfig } from './config.js';
 import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './types.js';
 
@@ -324,6 +325,7 @@ export class Orchestrator {
     this.outputBuffers.set(sessionId, '');
     this.runningThreads.add(threadKey);
     this.runningSessionIds.set(threadKey, sessionId);
+    log.info(this.ctx(sessionId), 'タスク開始');
 
     const cwdShort = resolvedCwd.split('/').slice(-2).join('/');
     const modeLabel = resumeClaudeSessionId ? '継続実行中' : '実行中';
@@ -359,6 +361,14 @@ export class Orchestrator {
       this.cleanupSessionFiles(sessionId);
       this.resumeSessions.delete(sessionId);
     }
+  }
+
+  /**
+   * ログ相関用コンテキスト: sessionIdからthreadKey / cwdを引く
+   */
+  private ctx(sessionId: string): Record<string, string> {
+    const s = this.stateManager.getSession(sessionId);
+    return s ? { sessionId, threadKey: `${s.channelId}:${s.threadTs}`, cwd: s.cwd } : { sessionId };
   }
 
   /**
@@ -484,7 +494,7 @@ export class Orchestrator {
       });
       if (!sent) await this.notifyApprovalProcessGone(pending);
       else this.stateManager.updateStatus(pending.sessionId, 'running');
-      log.info({ approvalKey: action.approvalKey }, '承認拒否');
+      log.info({ ...this.ctx(pending.sessionId), approvalKey: action.approvalKey }, '承認拒否');
       return;
     }
 
@@ -505,7 +515,10 @@ export class Orchestrator {
     });
     if (!sent) await this.notifyApprovalProcessGone(pending);
     else this.stateManager.updateStatus(pending.sessionId, 'running');
-    log.info({ approvalKey: action.approvalKey, actionId: action.actionId }, '承認OK、control_response送信');
+    log.info(
+      { ...this.ctx(pending.sessionId), approvalKey: action.approvalKey, actionId: action.actionId },
+      '承認OK、control_response送信',
+    );
   }
 
   private async notifyApprovalProcessGone(pending: PendingApprovalRecord): Promise<void> {
@@ -696,7 +709,7 @@ export class Orchestrator {
           break;
         }
 
-        const inputSummary = this.truncateInput(JSON.stringify(p.input, null, 2));
+        const inputSummary = redactSecrets(this.truncateInput(JSON.stringify(p.input, null, 2)));
         const context = `ツール: \`${p.toolName}\`\n\`\`\`${inputSummary}\`\`\``;
 
         const { ts } = await this.slackBot.postApprovalRequest({
@@ -723,7 +736,7 @@ export class Orchestrator {
 
         // 承認待ちもアイドルタイムアウトの対象にする（放置でプロセス終了）
         this.cliManager.markIdle(event.sessionId);
-        log.info({ approvalKey, toolName: p.toolName }, '承認ボタンを表示');
+        log.info({ ...this.ctx(event.sessionId), approvalKey, toolName: p.toolName }, '承認ボタンを表示');
         break;
       }
 
@@ -748,10 +761,11 @@ export class Orchestrator {
           await this.slackBot.postMessage({
             channelId: session.channelId,
             threadTs: session.threadTs,
-            text: msg,
+            text: redactSecrets(msg),
           });
         }
 
+        log.info(this.ctx(event.sessionId), 'タスク完了');
         this.stateManager.updateStatus(event.sessionId, 'completed');
         this.stateManager.deletePendingApprovalsBySession(event.sessionId);
         this.autoApprovals.delete(event.sessionId);
@@ -833,10 +847,11 @@ export class Orchestrator {
         }
 
         this.resumeSessions.delete(event.sessionId);
+        log.warn({ ...this.ctx(event.sessionId), content: event.content }, 'タスクエラー');
         await this.slackBot.postMessage({
           channelId: session.channelId,
           threadTs: session.threadTs,
-          text: `エラー: ${event.content}`,
+          text: redactSecrets(`エラー: ${event.content}`),
         });
 
         this.stateManager.updateStatus(event.sessionId, 'failed');
