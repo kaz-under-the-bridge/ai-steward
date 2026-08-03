@@ -24,8 +24,8 @@ spawn('claude', [
   '--input-format', 'stream-json',
   '--output-format', 'stream-json',
   '--verbose',
-  '--model', 'claude-fable-5',
-  '--effort', 'low',
+  '--model', model,     // MODEL_MAIN (default: claude-fable-5)、RepoConfigのmodelで上書き可
+  '--effort', effort,   // MODEL_MAIN_EFFORT (default: low)、RepoConfigのeffortで上書き可
   // 権限要求をcontrol_request(can_use_tool)としてstdioで受ける（help非掲載フラグ）
   '--permission-prompt-tool', 'stdio',
   '--permission-mode', 'default',   // RepoConfigで上書き可

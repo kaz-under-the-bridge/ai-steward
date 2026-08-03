@@ -15,6 +15,10 @@ const MANAGED_KEYS = [
   'DEFAULT_PERMISSION_MODE',
   'MAX_CONCURRENT_SESSIONS',
   'SESSION_TIMEOUT_MINUTES',
+  'MODEL_MAIN',
+  'MODEL_MAIN_EFFORT',
+  'MODEL_LIGHT',
+  'MODEL_MAINTENANCE',
 ];
 
 let savedEnv: Record<string, string | undefined>;
@@ -72,6 +76,29 @@ describe('loadConfig', () => {
   it('MAX_CONCURRENT_SESSIONSをenvで上書きできる', () => {
     process.env.MAX_CONCURRENT_SESSIONS = '5';
     expect(loadConfig().claude.maxConcurrentSessions).toBe(5);
+  });
+
+  it('モデル設定のデフォルト値', () => {
+    const config = loadConfig();
+    expect(config.models.main).toEqual({ model: 'claude-fable-5', effort: 'low' });
+    expect(config.models.light).toBe('claude-haiku-4-5-20251001');
+    expect(config.models.maintenance).toBe('claude-sonnet-4-6');
+  });
+
+  it('MODEL_*のenvで上書きできる', () => {
+    process.env.MODEL_MAIN = 'claude-opus-5';
+    process.env.MODEL_MAIN_EFFORT = 'high';
+    process.env.MODEL_LIGHT = 'claude-haiku-4-5';
+    process.env.MODEL_MAINTENANCE = 'claude-sonnet-5';
+    const config = loadConfig();
+    expect(config.models.main).toEqual({ model: 'claude-opus-5', effort: 'high' });
+    expect(config.models.light).toBe('claude-haiku-4-5');
+    expect(config.models.maintenance).toBe('claude-sonnet-5');
+  });
+
+  it('MODEL_MAIN_EFFORTの不正値はエラー', () => {
+    process.env.MODEL_MAIN_EFFORT = 'ultra';
+    expect(() => loadConfig()).toThrow('MODEL_MAIN_EFFORT');
   });
 
   it('数値envの不正値はエラー', () => {

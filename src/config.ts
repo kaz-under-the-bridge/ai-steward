@@ -5,6 +5,20 @@ export interface RepoConfig {
   permissionMode?: string;    // --permission-mode
   addDirs?: string[];          // --add-dir（複数可）
   extraArgs?: string[];        // その他の任意CLI引数
+  model?: string;              // --model（MODEL_MAINの上書き）
+  effort?: string;             // --effort（MODEL_MAIN_EFFORTの上書き）
+}
+
+// claude CLI --effort の許容値
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export interface ModelConfig {
+  // Claude Code CLI本体（--model / --effort）
+  main: { model: string; effort: string };
+  // Router / Formatter 用の軽量モデル
+  light: string;
+  // メンテナンスモード用モデル
+  maintenance: string;
 }
 
 export interface AppConfig {
@@ -27,6 +41,7 @@ export interface AppConfig {
     // 1タスクのwall-clockタイムアウト（分）
     sessionTimeoutMinutes: number;
   };
+  models: ModelConfig;
   anthropicApiKey: string | null;
   dbPath: string;
   logLevel: string;
@@ -82,12 +97,41 @@ function parsePositiveInt(key: string, defaultValue: number): number {
   return value;
 }
 
+/**
+ * effort値のenvを読む（未設定はデフォルト、許容値以外はエラー）
+ */
+function parseEffort(key: string, defaultValue: string): string {
+  const raw = process.env[key];
+  if (!raw) return defaultValue;
+  if (!(EFFORT_LEVELS as readonly string[]).includes(raw)) {
+    throw new Error(`環境変数 ${key} は ${EFFORT_LEVELS.join(' / ')} のいずれかで指定してください: ${raw}`);
+  }
+  return raw;
+}
+
+/**
+ * repos.json の model / effort を起動時に検証する（不正値は起動エラー）
+ */
+function validateRepoConfigs(repoConfigs: Map<string, RepoConfig>): void {
+  for (const [name, rc] of repoConfigs) {
+    if (rc.model !== undefined && (typeof rc.model !== 'string' || !rc.model.trim())) {
+      throw new Error(`repos.json ${name}.model は空でない文字列で指定してください`);
+    }
+    if (rc.effort !== undefined && !(EFFORT_LEVELS as readonly string[]).includes(rc.effort)) {
+      throw new Error(`repos.json ${name}.effort は ${EFFORT_LEVELS.join(' / ')} のいずれかで指定してください: ${rc.effort}`);
+    }
+  }
+}
+
 export function loadConfig(): AppConfig {
   const required = (key: string): string => {
     const value = process.env[key];
     if (!value) throw new Error(`環境変数 ${key} が設定されていません`);
     return value;
   };
+
+  const repoConfigs = loadRepoConfigs();
+  validateRepoConfigs(repoConfigs);
 
   return {
     slack: {
@@ -106,10 +150,18 @@ export function loadConfig(): AppConfig {
       maxConcurrentSessions: parsePositiveInt('MAX_CONCURRENT_SESSIONS', 3),
       sessionTimeoutMinutes: parsePositiveInt('SESSION_TIMEOUT_MINUTES', 60),
     },
+    models: {
+      main: {
+        model: process.env.MODEL_MAIN || 'claude-fable-5',
+        effort: parseEffort('MODEL_MAIN_EFFORT', 'low'),
+      },
+      light: process.env.MODEL_LIGHT || 'claude-haiku-4-5-20251001',
+      maintenance: process.env.MODEL_MAINTENANCE || 'claude-sonnet-4-6',
+    },
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
     dbPath: process.env.DB_PATH || './data/steward.db',
     logLevel: process.env.LOG_LEVEL || 'info',
-    repoConfigs: loadRepoConfigs(),
+    repoConfigs,
     channelRepoBindings: parseKeyValuePairs(process.env.CHANNEL_REPO_BINDINGS),
   };
 }
