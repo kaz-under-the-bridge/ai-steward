@@ -21,9 +21,18 @@ export type StreamEventType =
   | 'init'
   | 'assistant_text'
   | 'tool_use'
-  | 'permission_denied'
+  | 'permission_request'
   | 'result'
   | 'error';
+
+// control_request (can_use_tool) の構造化データ
+export interface PermissionRequestData {
+  requestId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  // CLIが提示する許可ルール候補（「今後も許可」応答のupdatedPermissionsに使う）
+  suggestions: unknown[];
+}
 
 export interface StreamEvent {
   sessionId: string;
@@ -31,15 +40,17 @@ export interface StreamEvent {
   content: string;
   raw: Record<string, unknown>;
   timestamp: Date;
+  permission?: PermissionRequestData;
 }
 
-// 承認リクエスト
+// 承認ボタンアクション
 export interface ApprovalAction {
   channelId: string;
   threadTs: string;
   userId: string;
-  actionId: 'approve' | 'reject';
-  sessionId: string;
+  actionId: 'approve' | 'approve_always' | 'reject';
+  // "sessionId:requestId" 形式（1セッション中に承認要求が複数回発生するため）
+  approvalKey: string;
 }
 
 // CLIセッション

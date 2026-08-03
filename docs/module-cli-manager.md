@@ -2,9 +2,9 @@
 
 ## 責務
 
-- Claude Code CLIプロセスの起動と管理
-- セッション単位でのプロセス管理
-- stdin書き込み（承認応答、追加入力）
+- Claude Code CLIプロセスの起動と管理（1スレッド = 1常駐プロセス）
+- 双方向stream-jsonでのメッセージ投入（userメッセージ、control_response）
+- アイドルタイムアウトによるプロセス回収
 - プロセス終了検知とクリーンアップ
 
 ## 境界
@@ -15,56 +15,60 @@
 
 ## CLI実行方式
 
-stream-json方式を採用。`child_process.spawn`でCLIを起動し、構造化JSONで入出力。
+双方向stream-json方式。stdinを開いたまま維持し、複数のuserメッセージと承認応答を
+同一プロセスに投入する。
 
 ```typescript
-// 新規セッション
 spawn('claude', [
-  '-p', prompt,
+  '-p',
+  '--input-format', 'stream-json',
   '--output-format', 'stream-json',
   '--verbose',
-], { cwd, env: { ...process.env, HOME: homeDir } });
+  '--model', 'claude-fable-5',
+  '--effort', 'low',
+  // 権限要求をcontrol_request(can_use_tool)としてstdioで受ける（help非掲載フラグ）
+  '--permission-prompt-tool', 'stdio',
+  '--permission-mode', 'default',   // RepoConfigで上書き可
+  // 再開時: '--resume', claudeSessionId
+], { cwd, env: { ...envWithoutApiKey, HOME: homeDir } });
+```
 
-// 対話継続
-spawn('claude', [
-  '-p', prompt,
-  '--output-format', 'stream-json',
-  '--verbose',
-  '--continue',
-  // または: '--resume', sessionId
-], { cwd, env: { ...process.env, HOME: homeDir } });
+stdin投入メッセージ:
+
+```json
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}
+{"type":"control_response","response":{"subtype":"success","request_id":"...","response":{"behavior":"allow","updatedInput":{...}}}}
 ```
 
 ## インターフェース
 
 ```typescript
 interface CliManagerConfig {
-  claudePath: string;              // default: 'claude'
+  claudePath: string;      // default: 'claude'
   defaultCwd: string;
-  homeDir: string;                 // Claude認証情報のHOME
-  maxConcurrentSessions: number;   // default: 5
-  idleTimeoutMs: number;           // default: 300000 (5分)
+  homeDir: string;         // Claude認証情報のHOME
+  idleTimeoutMs?: number;  // default: 600000 (10分)
 }
 
-interface CliSession {
-  sessionId: string;
-  claudeSessionId: string | null;  // Claude CLIのセッションID（stream-jsonのinit eventから取得）
-  pid: number;
-  createdAt: Date;
-  lastActivityAt: Date;
-}
+type PermissionResponse =
+  | { behavior: 'allow'; updatedInput: Record<string, unknown>; updatedPermissions?: unknown[] }
+  | { behavior: 'deny'; message: string };
 
-interface CliManager {
-  spawn(params: {
+class CliManager extends EventEmitter {
+  spawnSession(params: {
     sessionId: string;
     prompt: string;
     cwd?: string;
-    resumeSessionId?: string;      // 対話継続時
+    resumeClaudeSessionId?: string;
+    repoConfig?: RepoConfig;
   }): Promise<CliSession>;
 
-  write(sessionId: string, data: string): void;
-  kill(sessionId: string): void;
-  getSession(sessionId: string): CliSession | undefined;
+  sendUserMessage(sessionId: string, text: string): boolean;       // 常駐プロセスへ追送
+  sendControlResponse(sessionId: string, requestId: string, response: PermissionResponse): boolean;
+  markIdle(sessionId: string): void;    // アイドルタイマー開始（result後・承認待ち）
+  markBusy(sessionId: string): void;    // タイマー解除（送信時に自動で呼ばれる）
+  terminate(sessionId: string): void;   // 意図的終了（exitはcode 0扱い）
+  hasSession(sessionId: string): boolean;
   getActiveSessions(): CliSession[];
 
   on(event: 'data', listener: (sessionId: string, data: string) => void): void;
@@ -73,15 +77,12 @@ interface CliManager {
 }
 ```
 
-## 対話継続
+## ライフサイクル
 
-Claude CLIのセッションIDはstream-jsonの`init`イベントで取得:
-
-```json
-{"type":"system","subtype":"init","session_id":"36b2196c-..."}
-```
-
-このIDを保存し、次回メッセージで`--resume <session_id>`または`--continue`で継続。
+1. spawnSession → 最初のuserメッセージをstdin投入（stdinは閉じない）
+2. result受信後もプロセスは常駐。orchestratorがmarkIdleを呼びタイマー開始
+3. 同一スレッドの次メッセージはsendUserMessageで同一プロセスへ（タイマー解除）
+4. アイドルタイムアウトでterminate → 次メッセージは `--resume <claudeSessionId>` で新規プロセス再開
 
 ## エラーハンドリング
 
@@ -89,8 +90,8 @@ Claude CLIのセッションIDはstream-jsonの`init`イベントで取得:
 |--------|------|
 | CLI起動失敗 | errorイベント発火、セッションをfailed状態に |
 | CLI異常終了 | exitイベントにexitCode含めて通知 |
-| 同時セッション上限超過 | エラーを返す |
-| アイドルタイムアウト | プロセスkill、タイムアウト終了として通知 |
+| 意図的終了（terminate） | exitイベントをcode 0で通知（エラー扱いしない） |
+| 消滅済みセッションへの送信 | falseを返す（呼び出し元で--resume再開にフォールバック） |
 
 ## 依存関係
 

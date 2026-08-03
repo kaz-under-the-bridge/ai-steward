@@ -119,26 +119,24 @@ export class StreamProcessor extends EventEmitter {
         break;
       }
 
-      case 'user': {
-        // 権限エラーの検知: "Claude requested permissions to ..."
-        const userMessage = parsed.message as Record<string, unknown> | undefined;
-        if (userMessage?.content && Array.isArray(userMessage.content)) {
-          const toolResults = userMessage.content as Array<Record<string, unknown>>;
-          for (const tr of toolResults) {
-            if (tr.is_error && typeof tr.content === 'string' && tr.content.includes('Claude requested permissions')) {
-              eventType = 'permission_denied';
-              content = tr.content as string;
-              return {
-                sessionId,
-                type: eventType,
-                content,
-                raw: parsed,
-                timestamp: new Date(),
-              };
-            }
-          }
-        }
-        return null;
+      case 'control_request': {
+        // --permission-prompt-tool stdio による構造化権限要求
+        const request = parsed.request as Record<string, unknown> | undefined;
+        if (request?.subtype !== 'can_use_tool') return null;
+        const toolName = (request.tool_name as string) || '';
+        return {
+          sessionId,
+          type: 'permission_request',
+          content: toolName,
+          raw: parsed,
+          timestamp: new Date(),
+          permission: {
+            requestId: (parsed.request_id as string) || '',
+            toolName,
+            input: (request.input as Record<string, unknown>) || {},
+            suggestions: (request.permission_suggestions as unknown[]) || [],
+          },
+        };
       }
 
       default:
