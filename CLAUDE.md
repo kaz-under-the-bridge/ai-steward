@@ -95,6 +95,7 @@ stream-json入出力はNDJSON形式（1行1JSONオブジェクト）。主要イ
 | SLACK_APP_TOKEN | Yes | Slack App Token (xapp-...) |
 | SLACK_SIGNING_SECRET | Yes | Slack Signing Secret |
 | ALLOWED_CHANNEL_IDS | Yes | 許可チャンネルID（カンマ区切り） |
+| ALLOWED_USER_IDS | Yes | 許可SlackユーザーID（カンマ区切り）。未設定は起動エラー。メッセージ受信・承認ボタン押下の両方を制限 |
 | ANTHROPIC_API_KEY | No | Anthropic API Key (Formatter用、MVP3以降) |
 | CLAUDE_HOME | No | Claude認証情報のHOMEパス (default: $HOME) |
 | CLAUDE_CWD | No | デフォルト作業ディレクトリ (default: /home/kaz/git) |

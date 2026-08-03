@@ -23,6 +23,8 @@ interface SlackBotConfig {
   appToken: string;        // xapp-...
   signingSecret: string;
   allowedChannelIds: string[];
+  allowedUserIds: string[];        // 許可ユーザー（必須、fail-closed）
+  mentionOnlyChannelIds: string[]; // bot宛メンション必須チャンネル
 }
 ```
 
@@ -86,6 +88,7 @@ interface SlackBot {
 
 - Bot自身のメッセージ（subtype: 'bot_message'）は無視
 - `allowedChannelIds`に含まれないチャンネルは無視
+- `allowedUserIds`に含まれないユーザーのメッセージ・承認ボタン押下は無視（warnログのみ）
 - スレッド外メッセージ → 新規セッション開始
 - スレッド内メッセージ → 既存セッション継続（不在時は無視）
 
