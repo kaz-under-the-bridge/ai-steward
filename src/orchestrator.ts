@@ -12,10 +12,20 @@ import { Router } from './router/index.js';
 import { Maintenance } from './maintenance/index.js';
 import { resolveRepoByName, resolveRepoFromPrefix, getRepoNames } from './repo-resolver.js';
 import { redactSecrets } from './redaction.js';
+import { formatElapsed, formatTokenCount, elapsedSinceSqliteUtc } from './format-utils.js';
 import type { AppConfig, RepoConfig } from './config.js';
 import type { IncomingMessage, StreamEvent, ApprovalAction, SlackFile } from './types.js';
 
 const log = createChildLogger('orchestrator');
+
+// 直近タスクのusage（resultイベントのrawから収集、key: threadKey）
+interface TaskUsage {
+  model: string;
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  finishedAt: Date;
+}
 
 // 再起動復旧時の自動承認（key: 復旧後のsessionId）
 interface AutoApproval {
@@ -44,6 +54,9 @@ export class Orchestrator {
   private messageQueues: Map<string, IncomingMessage[]> = new Map();
   // 全体同時実行上限の順番待ちキュー
   private globalQueue: IncomingMessage[] = [];
+  // 直近タスクのusage（key: threadKey）と起動後の累計
+  private lastUsageByThread: Map<string, TaskUsage> = new Map();
+  private usageTotals = { tasks: 0, inputTokens: 0, outputTokens: 0, durationMs: 0 };
   // wall-clockタイムアウトタイマー（key: sessionId）
   private wallClockTimers: Map<string, NodeJS.Timeout> = new Map();
   // 再起動復旧後のセッションで、最初に一致したツール要求を自動承認する（key: sessionId）
@@ -131,6 +144,12 @@ export class Orchestrator {
 
   private async handleMessage(msg: IncomingMessage): Promise<void> {
     const threadKey = `${msg.channelId}:${msg.threadTs}`;
+
+    // 「!」prefixの操作コマンド（通常依頼と衝突しない予約形式）
+    if (msg.text && msg.text.trim().startsWith('!')) {
+      await this.handleCommand(msg.text.trim(), msg, threadKey);
+      return;
+    }
 
     // メンテナンスモード判定（キーワード起動 or 既存メンテスレッド）
     if (this.maintenance && msg.text) {
@@ -383,6 +402,102 @@ export class Orchestrator {
         return;
       }
     }
+  }
+
+  /**
+   * 「!」prefixの操作コマンドを処理する（!status / !stop / !usage）
+   */
+  private async handleCommand(text: string, msg: IncomingMessage, threadKey: string): Promise<void> {
+    const command = text.split(/\s+/)[0].toLowerCase();
+    const reply = (replyText: string) =>
+      this.slackBot.postMessage({ channelId: msg.channelId, threadTs: msg.threadTs, text: replyText });
+
+    log.info({ threadKey, command }, '操作コマンド受信');
+
+    switch (command) {
+      case '!status': {
+        const active = [
+          ...this.stateManager.listSessionsByStatus('running'),
+          ...this.stateManager.listSessionsByStatus('waiting_approval'),
+        ];
+        if (active.length === 0 && this.globalQueue.length === 0) {
+          await reply('実行中のタスクはありません。');
+          return;
+        }
+        const lines = active.map((s) => {
+          const cwdShort = s.cwd.split('/').slice(-2).join('/');
+          const elapsed = formatElapsed(elapsedSinceSqliteUtc(s.createdAt));
+          const statusLabel = s.status === 'waiting_approval' ? '承認待ち' : '実行中';
+          const here = `${s.channelId}:${s.threadTs}` === threadKey ? '（このスレッド）' : '';
+          return `• ${cwdShort} — ${statusLabel} — 経過 ${elapsed}${here}`;
+        });
+        if (this.globalQueue.length > 0) {
+          lines.push(`• 順番待ち: ${this.globalQueue.length}件`);
+        }
+        await reply(`実行中セッション (${active.length}件):\n${lines.join('\n')}`);
+        return;
+      }
+
+      case '!stop': {
+        if (!this.runningThreads.has(threadKey)) {
+          await reply('このスレッドに実行中のタスクはありません。');
+          return;
+        }
+        await this.handleCancel(threadKey, msg);
+        return;
+      }
+
+      case '!usage': {
+        const last = this.lastUsageByThread.get(threadKey);
+        const lines: string[] = [];
+        if (last) {
+          lines.push(
+            'このスレッドの直近タスク:',
+            `• モデル: ${last.model}`,
+            `• 実行時間: ${formatElapsed(last.durationMs)}`,
+            `• トークン: 入力 ${formatTokenCount(last.inputTokens)} / 出力 ${formatTokenCount(last.outputTokens)}`,
+          );
+        } else {
+          lines.push('このスレッドの完了タスクはまだありません。');
+        }
+        const t = this.usageTotals;
+        lines.push(
+          '',
+          `起動後の累計 (${t.tasks}タスク):`,
+          `• 実行時間: ${formatElapsed(t.durationMs)}`,
+          `• トークン: 入力 ${formatTokenCount(t.inputTokens)} / 出力 ${formatTokenCount(t.outputTokens)}`,
+          `• 実行中セッション: ${this.runningSessionIds.size}件`,
+        );
+        await reply(lines.join('\n'));
+        return;
+      }
+
+      default:
+        await reply(
+          `不明なコマンドです: ${command}\n使えるコマンド: \`!status\`（実行中一覧） \`!stop\`（このスレッドのタスクを中断） \`!usage\`（トークン・実行時間）`,
+        );
+        return;
+    }
+  }
+
+  /**
+   * resultイベントのrawからusage情報を収集する
+   */
+  private collectUsage(threadKey: string, raw: Record<string, unknown>): void {
+    const usage = (raw.usage as Record<string, unknown>) || {};
+    const modelUsage = (raw.modelUsage as Record<string, unknown>) || {};
+    const taskUsage: TaskUsage = {
+      model: Object.keys(modelUsage)[0] || 'claude-fable-5',
+      durationMs: (raw.duration_ms as number) || 0,
+      inputTokens: (usage.input_tokens as number) || 0,
+      outputTokens: (usage.output_tokens as number) || 0,
+      finishedAt: new Date(),
+    };
+    this.lastUsageByThread.set(threadKey, taskUsage);
+    this.usageTotals.tasks += 1;
+    this.usageTotals.inputTokens += taskUsage.inputTokens;
+    this.usageTotals.outputTokens += taskUsage.outputTokens;
+    this.usageTotals.durationMs += taskUsage.durationMs;
   }
 
   /**
@@ -765,6 +880,7 @@ export class Orchestrator {
           });
         }
 
+        this.collectUsage(threadKey, event.raw);
         log.info(this.ctx(event.sessionId), 'タスク完了');
         this.stateManager.updateStatus(event.sessionId, 'completed');
         this.stateManager.deletePendingApprovalsBySession(event.sessionId);
