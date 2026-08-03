@@ -82,6 +82,7 @@ export class Orchestrator {
         appToken: config.slack.appToken,
         signingSecret: config.slack.signingSecret,
         allowedChannelIds: config.slack.allowedChannelIds,
+        allowedUserIds: config.slack.allowedUserIds,
         mentionOnlyChannelIds: config.slack.mentionOnlyChannelIds,
       },
       {

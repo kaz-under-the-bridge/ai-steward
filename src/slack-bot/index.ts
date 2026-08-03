@@ -10,6 +10,7 @@ export interface SlackBotConfig {
   appToken: string;
   signingSecret: string;
   allowedChannelIds: string[];
+  allowedUserIds: string[];
   mentionOnlyChannelIds: string[];
 }
 
@@ -47,6 +48,13 @@ export class SlackBot {
 
       const channelId = message.channel;
       if (!this.config.allowedChannelIds.includes(channelId)) return;
+
+      // ユーザーallowlist（チャンネル制限とは独立に必須）
+      const senderId = 'user' in message ? (message.user ?? '') : '';
+      if (!this.config.allowedUserIds.includes(senderId)) {
+        log.warn({ channelId, userId: senderId }, '許可外ユーザーからのメッセージを無視');
+        return;
+      }
 
       const text = ('text' in message ? message.text : '') || '';
 
@@ -131,6 +139,12 @@ export class SlackBot {
         const channelId = body.channel?.id || '';
         const threadTs = body.message?.thread_ts || body.message?.ts || '';
         const userId = body.user.id;
+
+        // 承認操作もallowlistユーザーに制限（同席ユーザーの誤爆・悪用防止）
+        if (!this.config.allowedUserIds.includes(userId)) {
+          log.warn({ approvalKey, userId, actionId }, '許可外ユーザーの承認アクションを無視');
+          return;
+        }
 
         log.info({ approvalKey, userId, actionId }, '承認アクション押下');
         await handlers.onApprovalAction({
