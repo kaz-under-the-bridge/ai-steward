@@ -421,7 +421,7 @@ export class Orchestrator {
   }
 
   /**
-   * 「!」prefixの操作コマンドを処理する（!status / !stop / !usage）
+   * 「!」prefixの操作コマンドを処理する（!status / !stop / !restart / !usage）
    */
   private async handleCommand(text: string, msg: IncomingMessage, threadKey: string): Promise<void> {
     const command = text.split(/\s+/)[0].toLowerCase();
@@ -463,6 +463,42 @@ export class Orchestrator {
         return;
       }
 
+      case '!restart': {
+        // 常駐プロセスを終了する（claudeSessionIdはDBに残るため、次のメッセージは--resumeで文脈を引き継ぐ）
+        let terminated = false;
+
+        const runningSessionId = this.runningSessionIds.get(threadKey);
+        if (runningSessionId) {
+          this.cliManager.terminate(runningSessionId);
+          this.stateManager.updateStatus(runningSessionId, 'cancelled');
+          await this.expireApprovals(runningSessionId, '再起動により期限切れ');
+          this.messageQueues.delete(threadKey);
+          this.finishSession(threadKey, runningSessionId);
+          log.info({ threadKey, sessionId: runningSessionId }, '!restart: 実行中タスクを中断');
+          terminated = true;
+        }
+
+        const liveSessionId = this.liveThreadProcesses.get(threadKey);
+        if (liveSessionId) {
+          this.cliManager.terminate(liveSessionId);
+          this.liveThreadProcesses.delete(threadKey);
+          log.info({ threadKey, sessionId: liveSessionId }, '!restart: 常駐プロセスを終了');
+          terminated = true;
+        }
+
+        const existing = this.stateManager.getSessionByThread(msg.channelId, msg.threadTs);
+        if (existing?.claudeSessionId) {
+          await reply(
+            terminated
+              ? 'セッションを再起動しました。次のメッセージは文脈を引き継いで再開します。'
+              : '常駐プロセスは既に終了しています。次のメッセージは文脈を引き継いで再開します。',
+          );
+        } else {
+          await reply('このスレッドに再起動対象のセッションはありません。次のメッセージは新規セッションとして起動します。');
+        }
+        return;
+      }
+
       case '!usage': {
         const last = this.lastUsageByThread.get(threadKey);
         const lines: string[] = [];
@@ -490,7 +526,7 @@ export class Orchestrator {
 
       default:
         await reply(
-          `不明なコマンドです: ${command}\n使えるコマンド: \`!status\`（実行中一覧） \`!stop\`（このスレッドのタスクを中断） \`!usage\`（トークン・実行時間）`,
+          `不明なコマンドです: ${command}\n使えるコマンド: \`!status\`（実行中一覧） \`!stop\`（このスレッドのタスクを中断） \`!restart\`（文脈維持でプロセス再起動） \`!usage\`（トークン・実行時間）`,
         );
         return;
     }
