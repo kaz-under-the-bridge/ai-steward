@@ -39,7 +39,7 @@ src/
 ### デプロイ構成
 
 - systemdサービス: `/etc/systemd/system/ai-steward.service`
-- 環境変数: `~/.config/ai-steward/env`
+- 環境変数: `~/.config/ai-steward/env`（Ansibleは初回のみ`.env`からコピー。以後は直接編集 + `sudo systemctl restart ai-steward` で反映）
 - Ansibleロール: ouchi-server `ansible/roles/ai_steward/`
 - 適用: `cd ouchi-server/ansible && make local`
 - ログ: `sudo journalctl -u ai-steward -f`
@@ -118,6 +118,7 @@ stream-json入出力はNDJSON形式（1行1JSONオブジェクト）。主要イ
 | MODEL_MAINTENANCE | No | メンテナンスモード用モデル (default: claude-sonnet-4-6) |
 | MAX_CONCURRENT_SESSIONS | No | 常駐CLIプロセス数の全体上限 (default: 3)。超過分は順番待ちキューへ |
 | SESSION_TIMEOUT_MINUTES | No | 1タスクのwall-clockタイムアウト分 (default: 60)。超過で打ち切り通知 |
+| CLAUDE_AUTOCOMPACT_PCT_OVERRIDE | No | Claude CLIの自動compact発火点（コンテキスト消費率%、1〜100）。ai-stewardは読まずCLI子プロセスにそのまま透過する。CLI内部向け変数（公式doc非掲載、v2.1.220のバイナリで確認）。本番は20を設定 |
 | DB_PATH | No | SQLiteファイルパス (default: ./data/steward.db) |
 | LOG_LEVEL | No | ログレベル (default: info) |
 
